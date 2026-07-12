@@ -1,0 +1,545 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[brazilian,provide=*]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!50!black,
+  urlcolor=blue!50!black,
+  citecolor=blue!50!black,
+}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  columns=fullflexible,
+  keywordstyle=\color{blue!60!black}\bfseries,
+  commentstyle=\color{gray},
+  showstringspaces=false,
+  frame=single,
+  framesep=3pt,
+  xleftmargin=1em,
+  xrightmargin=1em,
+}
+
+\newcommand{\vx}{v_x}
+\newcommand{\vy}{v_y}
+
+\title{Estratégia para um Passo de Advecção\\
+Semi-Lagrangeana no \texttt{femns}}
+\author{Projeto \texttt{femns} -- documento de discussão (não implementado)}
+\date{Julho de 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Este documento é um resumo de estratégia, não uma especificação
+final: descreve como um passo de advecção semi-Lagrangeana poderia
+substituir o tratamento explícito atual do termo convectivo em
+\texttt{femns}, mapeando cada etapa do método para módulos concretos
+do projeto. O objetivo é servir de base de discussão antes de
+qualquer mudança na numérica do solver.
+\end{abstract}
+
+\tableofcontents
+
+% =====================================================================
+\section{Contexto: como a advecção é tratada hoje}
+% =====================================================================
+
+Em \texttt{solver.time\_step} (\texttt{src/femns/solver.py}), o termo
+convectivo linearizado é montado explicitamente a cada passo e jogado
+para o lado direito do sistema:
+
+\begin{lstlisting}[language=Python]
+vg = torch.mm(vx_diag, Gvx) + torch.mm(vy_diag, Gvy)
+b_sup = (1/dt) * torch.mm(M, vx.unsqueeze(1)) - torch.mm(vg, vx.unsqueeze(1))
+b_mid = (1/dt) * torch.mm(M, vy.unsqueeze(1)) - torch.mm(vg, vy.unsqueeze(1))
+\end{lstlisting}
+
+Ou seja: a matriz do sistema $A$ (\texttt{build\_system\_matrix}) só
+contém os blocos de massa/rigidez ($M/dt + K/Re$) e o acoplamento de
+pressão -- ela \emph{não} contém advecção. O termo advectivo é
+avaliado com o campo de velocidade do passo anterior e movido para
+$b$. Isso equivale a tratar a advecção de forma \textbf{explícita}
+(tipo Euler explícito) enquanto difusão e pressão continuam
+implícitas.
+
+O efeito prático: o passo de tempo \texttt{dt} fica limitado por uma
+condição do tipo CFL ($\text{dt} \lesssim h / |v|$) para a parte
+advectiva, mesmo a parte difusiva/pressão sendo incondicionalmente
+estável. Isso é a motivação natural para semi-Lagrangeano: o método
+trata a advecção de forma que não impõe essa restrição de CFL --
+permitindo \texttt{dt} maior -- ao custo de introduzir difusão
+numérica pela interpolação.
+
+% =====================================================================
+\section{Ideia central do método}
+% =====================================================================
+
+A equação de quantidade de movimento tem a forma
+\[
+\frac{D\mathbf{v}}{Dt} = \frac{\partial \mathbf{v}}{\partial t} +
+(\mathbf{v}\cdot\nabla)\mathbf{v} = -\nabla p + \frac{1}{Re}\nabla^2
+\mathbf{v}.
+\]
+O método semi-Lagrangeano discretiza a \textbf{derivada material}
+diretamente, em vez de discretizar separadamente o termo temporal e o
+convectivo:
+\[
+\frac{D\mathbf{v}}{Dt}\bigg|_{\mathbf{x}_n}^{t^{n+1}} \approx
+\frac{\mathbf{v}^{n+1}(\mathbf{x}_n) -
+\mathbf{v}^{n}(\mathbf{x}_d)}{dt},
+\]
+onde $\mathbf{x}_d$ é o \textbf{ponto de partida} (\emph{departure
+point}): a posição de onde a partícula de fluido que chega em
+$\mathbf{x}_n$ no tempo $t^{n+1}$ partiu no tempo $t^n$, seguindo a
+característica
+\[
+\frac{d\mathbf{x}}{dt} = \mathbf{v}(\mathbf{x}, t), \qquad
+\mathbf{x}(t^{n+1}) = \mathbf{x}_n.
+\]
+Como $\mathbf{v}^n(\mathbf{x}_d)$ não cai sobre um nó da malha, ele
+precisa ser \textbf{interpolado} a partir dos valores nodais nos
+vértices do elemento que contém $\mathbf{x}_d$. Substituindo isso na
+equação, o termo convectivo desaparece explicitamente do sistema: ele
+já está embutido na escolha de $\mathbf{x}_d$. O sistema linear passa
+a ter a mesma estrutura ($M/dt + K/Re$ no bloco de velocidade,
+acoplamento de pressão inalterado), só troca o RHS de $\frac{1}{dt}
+M\mathbf{v}^n - vg\,\mathbf{v}^n$ (advecção explícita) para
+$\frac{1}{dt} M\mathbf{v}^n_\star$ (velocidade interpolada no pé da
+característica).
+
+\subsection{O sistema em forma de blocos: antes e depois}
+
+Vale deixar isso explícito, porque é a mudança inteira em uma única
+equação. Hoje (\texttt{build\_system\_matrix} + \texttt{time\_step}
+em \texttt{solver.py}), o sistema resolvido a cada passo é
+
+\[
+\underbrace{\begin{bmatrix}
+M/dt + K/Re & 0 & -\beta G_x \\
+0 & M/dt + K/Re & -\beta G_y \\
+\beta D_x & \beta D_y & 0
+\end{bmatrix}}_{A}
+\begin{bmatrix} \vx^{n+1} \\ \vy^{n+1} \\ \tilde p^{n+1} \end{bmatrix}
+=
+\begin{bmatrix}
+\dfrac{1}{dt} M \vx^{n} - vg\,\vx^{n} \\[4pt]
+\dfrac{1}{dt} M \vy^{n} - vg\,\vy^{n} \\[4pt]
+0
+\end{bmatrix},
+\]
+\[
+vg = \operatorname{diag}(\vx^{n})\,G_{vx} + \operatorname{diag}(\vy^{n})\,G_{vy}
+\]
+(a advecção linearizada, montada a partir de $\vx^n, \vy^n$ e das
+matrizes convectivas $G_{vx}, G_{vy}$ de \texttt{assembly.py}, entra
+só no RHS -- $A$ nunca teve termo advectivo).
+
+Com semi-Lagrangeano, $A$ \textbf{não muda nada}: os mesmos blocos
+$M/dt + K/Re$ e o mesmo acoplamento de pressão. Muda só o RHS, que
+troca $\vx^n, \vy^n$ (valores no próprio nó) pelos valores
+interpolados no pé da característica, e o termo $vg$ some por
+completo -- não só de $A$, mas do RHS também:
+
+\[
+\begin{bmatrix}
+M/dt + K/Re & 0 & -\beta G_x \\
+0 & M/dt + K/Re & -\beta G_y \\
+\beta D_x & \beta D_y & 0
+\end{bmatrix}
+\begin{bmatrix} \vx^{n+1} \\ \vy^{n+1} \\ \tilde p^{n+1} \end{bmatrix}
+=
+\begin{bmatrix}
+\dfrac{1}{dt} M \vx^{n}_\star \\[4pt]
+\dfrac{1}{dt} M \vy^{n}_\star \\[4pt]
+0
+\end{bmatrix},
+\]
+onde $\vx^n_\star, \vy^n_\star$ são os campos interpolados nos pés das
+características (Seção~\ref{sec:estrategia}), calculados fora do
+sistema linear, num pré-processamento por nó.
+
+Duas consequências diretas dessa comparação:
+\begin{itemize}
+  \item \texttt{build\_system\_matrix} não precisaria de nenhuma
+    mudança -- é puramente a montagem de $A$, que já é a mesma nos
+    dois casos;
+  \item as matrizes $G_{vx}, G_{vy}$ (produzidas por
+    \texttt{assembly.assemble\_mini}) deixariam de ser usadas no
+    fluxo de \texttt{time\_step} assim que a advecção explícita for
+    removida -- hoje elas só servem para montar $vg$. \textbf{Decisão}
+    (\S\ref{sec:transicao}): as duas abordagens ficam lado a lado
+    durante a validação, então $G_{vx}, G_{vy}$ continuam montadas e
+    em uso normalmente até a migração ser confirmada -- só remover
+    depois.
+\end{itemize}
+
+% =====================================================================
+\section{Estratégia de implementação proposta}
+\label{sec:estrategia}
+% =====================================================================
+
+Seguindo a separação de responsabilidades do projeto (ver README --
+\texttt{mesh.py}/\texttt{assembly.py}/\texttt{boundary.py} não sabem
+de config nem de I/O, cada um faz uma coisa), a proposta é um módulo
+novo, \texttt{src/femns/semi\_lagrangian.py}, com lógica pura de
+malha + interpolação -- sem saber de \texttt{torch} esparso, sistema
+global ou BiCGSTAB. \texttt{solver.py} consome sua saída.
+
+\subsection{Passo 1 -- Backtrace: encontrar o ponto de partida}
+
+Para cada nó $\mathbf{x}_n$ (incluindo os nós de centroide/bolha do
+elemento MINI, já que $vx, vy$ têm um valor em cada um), calcular
+\[
+\mathbf{x}_d = \mathbf{x}_n - dt\,\mathbf{v}(\mathbf{x}_n, t^n).
+\]
+Essa é a aproximação de Euler (1\textsuperscript{a} ordem).
+\textbf{Decisão}: usar Euler explícito nesta primeira implementação
+-- mais simples de codificar e testar, com uma única avaliação de
+velocidade por nó. Uma variante mais precisa, RK2/ponto médio
+(estimar $\mathbf{x}_d$ com Euler, avaliar a velocidade no meio do
+caminho e refazer o passo), fica como evolução futura caso a
+validação da \S\ref{sec:transicao} mostre erro de posição relevante
+-- não é necessária para a primeira versão funcional.
+
+\subsection{Passo 2 -- Localizar o elemento que contém o ponto de partida}
+
+Esta é a parte algoritmicamente mais delicada, e a única que
+introduz um algoritmo de natureza diferente de tudo que já existe no
+projeto (que é montagem vetorizada + álgebra linear). Vale detalhar.
+
+\paragraph{Por que não busca global.} Testar os \texttt{ne} elementos
+para cada nó é $O(\text{npoints} \times \text{ne})$ -- na malha do
+Poiseuille já mencionada no README ($n\approx 19$ mil incógnitas)
+isso é inviável por passo de tempo. A alternativa padrão em métodos
+de características para FEM é a \textbf{busca por caminhada}
+(\emph{walking search}): partir do elemento que já se conhece (o
+elemento ao qual o próprio nó $\mathbf{x}_n$ pertence) e "andar" na
+malha, elemento vizinho por elemento vizinho, na direção de
+$\mathbf{x}_d$, usando só conectividade local -- custo $O(k)$ por nó,
+onde $k$ é o número de elementos cruzados (tipicamente pequeno,
+porque o deslocamento $dt\,|\mathbf{v}|$ costuma ser da ordem de uma
+fração do tamanho de elemento $h$).
+
+\paragraph{Coordenadas baricêntricas reaproveitando \texttt{assembly.py}.}
+Para um triângulo de vértices $i,j,k$ (ordenados como em
+\texttt{IEN}), as coordenadas baricêntricas de um ponto
+$\mathbf{x}=(x,y)$ são razões de área com sinal:
+\[
+\lambda_i(\mathbf{x}) = \frac{\operatorname{Area}(\mathbf{x}, j, k)}{\operatorname{Area}(i,j,k)}, \quad
+\lambda_j(\mathbf{x}) = \frac{\operatorname{Area}(i, \mathbf{x}, k)}{\operatorname{Area}(i,j,k)}, \quad
+\lambda_k(\mathbf{x}) = \frac{\operatorname{Area}(i, j, \mathbf{x})}{\operatorname{Area}(i,j,k)},
+\]
+com $\lambda_i+\lambda_j+\lambda_k=1$ (só precisa calcular duas, a
+terceira sai por diferença). Usando a área com sinal
+$\operatorname{Area}(a,b,c)=\tfrac12\big[(x_b-x_a)(y_c-y_a) -
+(x_c-x_a)(y_b-y_a)\big]$, essas razões coincidem com as funções de
+forma P1 do elemento, $\lambda_i \equiv N_i$, que são exatamente
+lineares nos mesmos coeficientes $b_i, c_i$ que
+\texttt{assembly.assemble\_mini} já calcula para montar $K$ e $M$
+(\texttt{bi = Y[vj]-Y[vk]}, \texttt{ci = X[vk]-X[vj]}, antes do
+\texttt{torch.abs} aplicado à área -- aqui precisamos do sinal, não
+do valor absoluto). Como $\lambda_i(x_i,y_i)=1$ e $\lambda_i$ é afim
+com gradiente $(b_i,c_i)/(2A)$, dá para escrever, sem precisar do
+termo independente $a_i$ da forma padrão $N_i=(a_i+b_ix+c_iy)/(2A)$:
+\[
+\lambda_i(\mathbf{x}_d) = 1 + \frac{b_i\,(x_d - x_i) + c_i\,(y_d - y_i)}{2A},
+\]
+e de forma análoga para $\lambda_j, \lambda_k$ trocando $(i,b_i,c_i)$
+por $(j,b_j,c_j)$ e $(k,b_k,c_k)$. O ponto de reaproveitar os
+coeficientes de \texttt{assembly.py} é só evitar duas implementações
+divergentes do mesmo elemento -- vale bater esse cálculo contra a
+fórmula de área com sinal do parágrafo anterior num teste antes de
+decidir qual usar.
+
+\paragraph{Algoritmo de caminhada.} Por nó, partindo do elemento ao
+qual o próprio nó pertence:
+\begin{enumerate}
+  \item Calcular $(\lambda_0, \lambda_1, \lambda_2)$ de
+    $\mathbf{x}_d$ em relação aos 3 vértices do elemento atual (o nó
+    de centroide/bolha não entra aqui, só na interpolação do
+    Passo~3).
+  \item Se $\lambda_0, \lambda_1, \lambda_2 \ge -\varepsilon$ (uma
+    tolerância numérica pequena, não $\ge 0$ estrito -- ver nota de
+    robustez abaixo), o ponto está dentro: parar.
+  \item Caso contrário, seja $m = \arg\min_i \lambda_i$ o vértice de
+    coordenada mais negativa. Isso indica que o ponto está do lado
+    de fora da face oposta a $m$ -- na convenção de
+    \texttt{mesh.montar\_EToE} (\texttt{faces\_locais = [(0,1),
+    (1,2), (2,0)]}, face $f$ liga os vértices locais $f$ e
+    $(f+1)\bmod 3$), a face oposta ao vértice local $m$ é a face
+    $(m+1)\bmod 3$. Seguir para \texttt{EToE[elem\_atual, (m+1)\%3]}.
+  \item Se \texttt{EToE} indicar \texttt{-1} (face de contorno), o
+    ponto de partida caiu fora do domínio -- tratar como
+    \S\ref{sec:fora}, não continuar a caminhada.
+  \item Repetir a partir do passo 1 no novo elemento, até localizar
+    ou sair do domínio.
+\end{enumerate}
+
+\paragraph{Notas de robustez (relevantes antes de codificar).}
+\begin{itemize}
+  \item \textbf{Tolerância na comparação com zero}: como as
+    coordenadas vêm de aritmética de ponto flutuante, um ponto
+    exatamente sobre uma aresta compartilhada (comum quando o
+    deslocamento por passo é pequeno e $\mathbf{x}_d$ cai perto do
+    próprio nó de origem) pode dar $\lambda_i$ ligeiramente negativa
+    por erro de arredondamento mesmo estando "dentro" -- daí a
+    tolerância $\varepsilon$ no critério de parada, em vez de
+    comparação estrita com zero.
+  \item \textbf{Limite de iterações}: em malhas muito distorcidas ou
+    perto de cantos não-convexos, a heurística "andar na direção da
+    coordenada mais negativa" pode, em casos patológicos, não
+    convergir monotonicamente (Devillers, Pion \& Teillaud, 2001,
+    documentam isso para busca por caminhada em triangulações e
+    propõem variantes mais robustas, ex.\ \emph{orientation walk}).
+    Na prática, para uma malha razoável (a exemplo da gerada por
+    Gmsh no projeto), poucos saltos bastam -- mas vale por um limite
+    de iterações (ex.\ proporcional a $\sqrt{\texttt{ne}}$) com um
+    \emph{fallback} explícito (busca local nos vizinhos de
+    \texttt{NToN}, ou marcar como não localizado e cair no
+    tratamento de fora-do-domínio) em vez de deixar o laço rodar
+    indefinidamente.
+  \item \textbf{\texttt{EToE} ainda não está conectado ao
+    pipeline}: hoje \texttt{montar\_EToE} existe e é testada
+    (\texttt{tests/test\_mesh.py}), mas \texttt{scripts/run\_simulation.py}
+    não a chama -- só chama \texttt{montar\_NToN}. Parte do trabalho
+    de implementação é efetivamente construir \texttt{EToE} no setup
+    (sobre \texttt{mesh.IEN}, antes do \texttt{elem\_mini} acrescentar
+    o nó de centroide, já que faces são definidas pelos 3 vértices),
+    do mesmo jeito que \texttt{NToN} já é construído hoje.
+\end{itemize}
+
+\subsection{Passo 3 -- Interpolar a velocidade no pé da característica}
+
+Comparado ao Passo 2, este é simples: uma vez que se sabe o elemento
+e as coordenadas baricêntricas $(\lambda_i, \lambda_j, \lambda_k)$ de
+$\mathbf{x}_d$, resta avaliar o campo $\vx^n, \vy^n$ nesse ponto.
+
+\paragraph{Fórmula (P1 + bolha).} O ponto importante é que
+$\vx^n,\vy^n$ \emph{já são} funções do espaço MINI -- a mesma base
+usada para montar $K, M, G_x, G_y$ em \texttt{assembly.py} --, então
+interpolar não é ajustar uma função nova aos valores nodais, é
+simplesmente \textbf{avaliar a função que já existe} nesse ponto,
+usando sua própria expansão de base:
+\[
+v_\star(\mathbf{x}_d) = \lambda_i v_i + \lambda_j v_j + \lambda_k v_k
++ \underbrace{27\,\lambda_i\lambda_j\lambda_k}_{\text{bolha}}\, v_b,
+\]
+onde $v_i,v_j,v_k$ são os valores nodais nos 3 vértices do elemento e
+$v_b$ é o valor no nó de centroide desse elemento (a 4\textsuperscript{a}
+coluna de \texttt{IEN}, criada por \texttt{mesh.elem\_mini}). A função
+bolha $27\lambda_i\lambda_j\lambda_k$ é a mesma que aparece implícita
+nos coeficientes \texttt{9/10}, \texttt{27/10}, \texttt{81/10} de
+\texttt{assembly.assemble\_mini} -- vale $1$ no centroide
+($\lambda_i=\lambda_j=\lambda_k=1/3$) e $0$ em toda a borda do
+triângulo (basta um $\lambda=0$).
+
+\paragraph{Por que incluir a bolha, e o que $v_b$ significa.} Isso
+resolve a dúvida deixada em aberto numa versão anterior deste
+documento ("interpolar só a parte P1 ou incluir a bolha?"): a
+resposta é incluir, e não é uma escolha de projeto -- é uma questão
+de consistência. $v_b$ \textbf{não} é a velocidade física no ponto
+central do elemento; é o coeficiente modal da bolha na representação
+MINI do campo (por isso o método funciona mesmo $v_b$ não tendo
+interpretação nodal direta). Descartar o termo da bolha na
+interpolação seria avaliar uma função \emph{diferente} da que o
+resto do solver está de fato resolvendo -- inconsistente com a
+própria discretização. Como $\lambda_i,\lambda_j,\lambda_k$ já foram
+calculados no Passo 2, o termo extra é barato (mais uma
+multiplicação por nó).
+
+\paragraph{Higiene numérica.} A tolerância $\varepsilon$ do critério
+de parada do Passo 2 permite $\lambda_i$ ligeiramente negativa
+($-\varepsilon \le \lambda_i < 0$) para pontos perto de uma aresta.
+Antes de usar os $\lambda$'s como pesos aqui, vale recortá-los para
+$[0,1]$ (\texttt{torch.clamp}) e -- se a soma não bater exatamente em
+$1$ por causa do recorte -- renormalizar, para garantir que a parte
+P1 da interpolação seja sempre uma combinação convexa dos 3 valores
+nodais (sem overshoot introduzido pelo próprio critério de tolerância,
+distinto do overshoot inerente à interpolação, comentado abaixo).
+
+\paragraph{Vetorização.} Ao contrário do Passo 2 (caminhada,
+sequencial em número de saltos), este passo é uma soma ponderada
+simples -- assim que se tem, para cada nó, o índice do elemento
+encontrado e os $(\lambda_i,\lambda_j,\lambda_k)$, a interpolação de
+todos os nós de uma vez é um \texttt{gather} dos 4 valores nodais por
+elemento (3 vértices + bolha) seguido de produto e soma, no mesmo
+estilo vetorizado que \texttt{assembly.py} já usa para montar as
+matrizes de elemento. Não há laço nesta etapa.
+
+\paragraph{Ordem de precisão e overshoot.}
+\label{sec:interp-ordem}
+Interpolação P1 (+ bolha)
+é exata para campos que já são combinação linear dessa base, mas
+introduz erro de truncamento de $O(h^2)$ para campos mais suaves --
+esse é o mecanismo concreto da "difusão numérica" mencionada na
+\S 4 (Impacto esperado). Um efeito relacionado, comum em métodos
+semi-Lagrangeanos, é \emph{overshoot}: interpolação linear não
+garante que $v_\star$ fique entre o mínimo e o máximo dos valores
+nodais do elemento em todas as situações combinadas com o termo de
+bolha (que não é monotônico). Staniforth \& Côté (1991), a referência
+clássica de revisão de esquemas semi-Lagrangeanos, discutem esse
+problema e limitadores para mitigá-lo -- não é necessário para uma
+primeira versão funcional, mas vale ter em mente se aparecerem picos
+não-físicos de velocidade perto de gradientes acentuados (ex.\ camada
+limite).
+
+\paragraph{Teste.} Seguindo o padrão de \texttt{tests/}: escolher
+valores nodais arbitrários $v_i,v_j,v_k,v_b$ para um triângulo de
+referência (os mesmos usados em \texttt{tests/test\_assembly.py}),
+calcular $v_\star$ à mão para um ponto interno conhecido (ex.\ o
+próprio centroide, onde a fórmula colapsa para
+$\tfrac13(v_i+v_j+v_k) + v_b$) e comparar com a saída da função de
+interpolação -- valida a fórmula isolada do Passo 2 (localização).
+
+\subsection{Passo 4 -- Trocar o termo convectivo em \texttt{solver.py}}
+
+Em \texttt{time\_step}, substituir:
+\begin{lstlisting}[language=Python]
+vg = torch.mm(vx_diag, Gvx) + torch.mm(vy_diag, Gvy)
+b_sup = (1/dt) * torch.mm(M, vx.unsqueeze(1)) - torch.mm(vg, vx.unsqueeze(1))
+\end{lstlisting}
+por algo como:
+\begin{lstlisting}[language=Python]
+vx_star, vy_star = semi_lagrangian.backtrace_and_interpolate(...)
+b_sup = (1/dt) * torch.mm(M, vx_star.unsqueeze(1))
+\end{lstlisting}
+A matriz $A$ (\texttt{build\_system\_matrix}) não muda -- ela já não
+tinha advecção. O ganho de \texttt{dt} maior sem instabilidade vem
+inteiramente dessa troca no RHS.
+
+\subsection{Pontos de partida fora do domínio}
+\label{sec:fora}
+
+Perto de contornos de entrada (\emph{inlet}), o pé da característica
+pode cair fora da malha -- fisicamente correto (a partícula "veio de
+fora", carregando o valor de contorno). \textbf{Decisão}: se a
+caminhada sair do domínio, usar o valor de Dirichlet do contorno por
+onde saiu (ex.\ \texttt{inlet: \{vx: 1.0, vy: 0.0\}} no config); se o
+contorno não definir esse componente ali (ex.\ \texttt{outlet}, que
+só define \texttt{p} no exemplo do README), usar o valor atual do
+próprio nó de chegada como aproximação -- equivalente a um passo de
+Euler explícito só nesse nó, ou seja, cai de volta no comportamento
+de hoje exatamente nos casos em que não há dado de contorno melhor
+para usar. \texttt{boundary.py} já resolve qual nome de contorno cada
+nó tem (\texttt{assign\_boundary\_names}) -- a mesma lógica de
+prioridade dá para reaproveitar aqui.
+
+\subsection{Vetorização em GPU / \texttt{torch}}
+
+A caminhada (Passo 2) é sequencial por natureza (número de passos
+varia por nó), o que não vetoriza tão bem quanto o resto do projeto
+(que é 100\% montagem vetorizada em \texttt{torch}, ver
+\texttt{assembly.py}). Estratégia realista: vetorizar \emph{entre}
+nós (todos os nós fazem "um passo de caminhada" em paralelo, um
+tensor booleano marca quais já terminaram) e iterar até que todos
+convirjam -- número de iterações do laço = máximo de saltos de
+elemento entre todos os nós, não \texttt{npoints} $\times$
+\texttt{ne}. Vale prototipar em CPU/\texttt{numpy} primeiro (mais
+fácil de depurar com \texttt{prints}/asserts) e só depois portar para
+\texttt{torch} caso o custo por passo de tempo se mostre relevante.
+
+\subsection{Testes}
+
+Seguindo o padrão de \texttt{tests/} (que testa \texttt{assembly.py}
+contra valores analíticos de um triângulo de referência, sem
+depender de malha \texttt{.msh}): um teste unitário com 1--2
+triângulos e um campo de velocidade constante (translação pura) tem
+solução fechada para o ponto de partida e para a interpolação --
+bom primeiro caso para validar localização + interpolação
+isoladamente, antes de plugar em \texttt{time\_step}.
+
+\subsection{Estratégia de transição e validação}
+\label{sec:transicao}
+
+\textbf{Decisão}: as duas abordagens de advecção ficam lado a lado
+durante a validação, em vez de substituir a atual de uma vez. Um
+parâmetro novo no config (ex.\ \texttt{simulation.advection: explicit
+| semi\_lagrangian}, junto de \texttt{dt}/\texttt{iterations}/
+\texttt{reynolds}) seleciona qual caminho \texttt{time\_step} usa a
+cada passo -- \texttt{explicit} continua montando $vg$ com $G_{vx},
+G_{vy}$ como hoje, \texttt{semi\_lagrangian} usa
+\texttt{semi\_lagrangian.backtrace\_and\_interpolate}. Isso mantém as
+matrizes $G_{vx}, G_{vy}$ em uso normalmente até a migração ser
+confirmada.
+
+Validação proposta, no mesmo espírito da tabela comparativa que
+valida o BiCGSTAB em \texttt{docs/bicgstab\_solver.pdf}: rodar o
+Poiseuille de exemplo (\texttt{configs/poiseuille.yaml}, com
+\texttt{iterations} reduzido para testar rápido) com \texttt{dt}
+pequeno -- onde a advecção explícita atual é estável e portanto serve
+de referência -- nas duas abordagens, e comparar posição de nó
+(efeito do \texttt{moving\_point}) e campos de velocidade/pressão ao
+longo das iterações. Só depois de bater (dentro de uma tolerância
+compatível com a ordem de erro esperada da interpolação P1+bolha, ver
+\S\ref{sec:interp-ordem}) faz sentido testar \texttt{dt} maior -- onde
+as duas deixam de ser diretamente comparáveis, já que aí é onde o
+semi-Lagrangeano deveria continuar estável e o explícito não. Remover
+$G_{vx}, G_{vy}$/\texttt{vg} e a opção \texttt{explicit} do config só
+depois dessa validação, não antes.
+
+% =====================================================================
+\section{Impacto esperado e trade-offs}
+% =====================================================================
+
+\begin{itemize}
+  \item \textbf{A favor}: remove a restrição de CFL da advecção,
+    permitindo \texttt{dt} maior (potencialmente relevante já que o
+    README aponta \texttt{dt} pequeno como parte do custo por
+    iteração).
+  \item \textbf{Contra}: interpolação (mesmo linear) introduz difusão
+    numérica -- a solução deixa de ser idêntica à advecção Galerkin
+    explícita atual, mesmo em \texttt{dt} pequeno onde ambas seriam
+    estáveis. Isso é uma mudança de \emph{numérica}, não só de
+    performance.
+  \item Complexidade nova: busca por elemento (Passo 2) é um
+    algoritmo diferente de tudo que existe hoje no projeto (que é só
+    montagem vetorizada + solve linear) -- maior superfície para
+    bugs sutis (ex.: caminhada que não converge em malhas muito
+    distorcidas).
+\end{itemize}
+
+% =====================================================================
+\section{Referências}
+% =====================================================================
+
+\begin{enumerate}
+  \item Pironneau, O. (1982). \emph{On the transport-diffusion
+    algorithm and its applications to the Navier--Stokes equations}.
+    Numerische Mathematik, 38(3), 309--332. -- artigo original que
+    introduz o método de características (semi-Lagrangeano) aplicado
+    a elementos finitos para Navier--Stokes; base teórica direta para
+    a formulação da \S 2.
+  \item Donea, J., \& Huerta, A. (2003). \emph{Finite Element Methods
+    for Flow Problems}. Wiley. -- capítulo sobre métodos
+    Characteristic-Galerkin/semi-Lagrangeanos, com algoritmos práticos
+    de localização de ponto em malhas de elementos finitos (base do
+    Passo 2) e discussão de erro de interpolação/difusão numérica
+    (\S 4).
+  \item Devillers, O., Pion, S., \& Teillaud, M. (2001). \emph{Walking
+    in a triangulation}. International Journal of Foundations of
+    Computer Science, 13(2), 181--199. -- análise da busca por
+    caminhada (\emph{walking search}) usada no Passo 2: condições de
+    convergência, casos patológicos e variantes mais robustas que a
+    heurística "coordenada mais negativa" usada aqui.
+  \item Staniforth, A., \& Côté, J. (1991). \emph{Semi-Lagrangian
+    integration schemes for atmospheric models -- a review}. Monthly
+    Weather Review, 119(9), 2206--2223. -- revisão clássica de
+    esquemas semi-Lagrangeanos; discute ordem de precisão da
+    interpolação no pé da característica e o problema de overshoot
+    citado no Passo 3.
+\end{enumerate}
+
+\end{document}

@@ -1,6 +1,6 @@
 import numpy as np
 
-from femns.mesh import elem_mini, montar_EToE, montar_NToN
+from femns.mesh import elem_mini, montar_EToE, montar_node_to_elem, montar_NToN
 
 
 def quadrado_dois_triangulos():
@@ -35,6 +35,20 @@ def test_montar_EToE_face_compartilhada():
     assert EToE[0, 1] == -1
     assert EToE[1, 1] == -1
     assert EToE[1, 2] == -1
+
+
+def test_montar_node_to_elem():
+    _, _, IEN = quadrado_dois_triangulos()
+    node_to_elem = montar_node_to_elem(IEN, npoints=4)
+
+    # No 0 e 2 pertencem aos dois elementos (0 e 1); o primeiro elemento
+    # encontrado ao varrer IEN e o elemento 0 para ambos.
+    assert node_to_elem[0] == 0
+    assert node_to_elem[2] == 0
+
+    # No 1 so pertence ao elemento 0, no 3 so ao elemento 1.
+    assert node_to_elem[1] == 0
+    assert node_to_elem[3] == 1
 
 
 def test_elem_mini_adiciona_centroide():

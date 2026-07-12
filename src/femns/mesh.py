@@ -113,3 +113,20 @@ def montar_NToN(IEN: np.ndarray, n_nos: int):
         NToN[i] = np.array(sorted(v), dtype=int)
 
     return NToN
+
+
+def montar_node_to_elem(IEN: np.ndarray, npoints: int):
+    """Monta, para cada no de vertice, o indice de um elemento que o contem.
+
+    So cobre os `npoints` nos "reais" (vertices, sem o centroide/bolha
+    do elemento MINI) -- e um chute inicial barato para busca por
+    caminhada em malha (ex.: localizacao de ponto em metodos
+    semi-Lagrangeanos), nao precisa ser o unico elemento vizinho.
+    """
+    node_to_elem = np.full(npoints, -1, dtype=int)
+    for e, elem in enumerate(IEN):
+        for a in elem:
+            if node_to_elem[a] == -1:
+                node_to_elem[a] = e
+
+    return node_to_elem
