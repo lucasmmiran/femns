@@ -1,12 +1,12 @@
-mesh: meshes/poiseuille.msh
-output_dir: solucoes/poiseuille
+mesh: meshes/degrau.msh
+output_dir: solucoes/degrau_sl
 benchmark_xlsx: solucoes/benchmarks.xlsx
 
 simulation:
-  dt: 0.001
+  dt: 0.01
   iterations: 1000
   reynolds: 1
-  advection: explicit  # explicit (padrao, hoje) ou semi_lagrangian
+  advection: semi_lagrangian  # explicit (Euleriano) ou semi_lagrangian
 
 boundary:
   # Ordem de prioridade dos contornos, da mais baixa para a mais alta.

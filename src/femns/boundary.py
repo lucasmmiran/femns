@@ -4,33 +4,47 @@ import numpy as np
 import torch
 
 
-def assign_boundary_names(IENbound: np.ndarray, IENboundElem: list, npoints: int, priority: list[str]):
+def assign_boundary_names(IENbound: np.ndarray, IENboundElem: list, npoints: int, priority: list[str],
+                           IENpoint: np.ndarray = None, IENpointElem: list = None):
     """Atribui a cada no de contorno o nome do contorno ao qual ele pertence.
 
     `priority` lista os nomes de contorno da prioridade mais baixa para a
     mais alta: quando um no pertence a mais de um contorno (ex.: quinas da
     malha), prevalece o ultimo nome da lista que o contem.
+
+    `IENpoint`/`IENpointElem` (opcionais, de `mesh.read_mesh`) cobrem
+    contornos definidos por um unico no (ex.: ponto de referencia de
+    pressao numa cavidade tampada, sem saida fisica de fluido) -- tratados
+    dentro da mesma ordem de prioridade que as arestas.
     """
     ccName = [None for _ in range(npoints)]
+    IENpoint = IENpoint if IENpoint is not None else np.empty(0, dtype=int)
+    IENpointElem = IENpointElem if IENpointElem is not None else []
 
     for nome in priority:
         for a, b in IENbound[np.array(IENboundElem) == nome]:
             ccName[a] = nome
             ccName[b] = nome
+        for a in IENpoint[np.array(IENpointElem) == nome]:
+            ccName[a] = nome
 
     return ccName
 
 
-def build_boundary_conditions(IENbound: np.ndarray, ccName: list, conditions: dict, npoints: int, device):
+def build_boundary_conditions(IENbound: np.ndarray, ccName: list, conditions: dict, npoints: int, device,
+                               IENpoint: np.ndarray = None):
     """Monta os vetores de condicao de contorno (valores e indices) a partir do config.
 
     `conditions` mapeia nome do contorno -> {"vx": v, "vy": v, "p": v}; um
     componente so e restringido (Dirichlet) nos contornos que o listam.
+    `IENpoint` (opcional) acrescenta nos marcados por contorno de ponto
+    unico (ver `assign_boundary_names`) ao conjunto de nos considerado.
 
     Retorno: vx_cc, vy_cc, p_cc (tensores com o valor da condicao em cada no)
     e vx_cc_pts, vy_cc_pts, p_cc_pts (indices dos nos restringidos por componente).
     """
-    cc = np.unique(IENbound.reshape(IENbound.size))
+    IENpoint = IENpoint if IENpoint is not None else np.empty(0, dtype=int)
+    cc = np.unique(np.concatenate([IENbound.reshape(IENbound.size), IENpoint]))
     ccName_arr = np.array(ccName, dtype=object)
 
     vx_cc = torch.zeros(npoints, dtype=torch.float64, device=device)

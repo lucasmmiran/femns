@@ -1,0 +1,550 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[brazilian,provide=*]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!50!black,
+  urlcolor=blue!50!black,
+  citecolor=blue!50!black,
+}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  columns=fullflexible,
+  keywordstyle=\color{blue!60!black}\bfseries,
+  commentstyle=\color{gray},
+  showstringspaces=false,
+  frame=single,
+  framesep=3pt,
+  xleftmargin=1em,
+  xrightmargin=1em,
+}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\vx}{v_x}
+\newcommand{\vy}{v_y}
+
+\title{Do Solve Denso ao BiCGSTAB Reescalonado:\\
+Um Solver Linear Esparso para o Sistema de Sela\\
+de Navier--Stokes em GPU}
+\author{Projeto \texttt{femns}}
+\date{Julho de 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Este documento registra a substituição do solver linear denso do
+pacote \texttt{femns} (\texttt{torch.linalg.solve} sobre a matriz
+convertida para densa a cada passo de tempo) por um solver iterativo
+esparso -- BiCGSTAB, implementado em PyTorch puro -- e explica os
+conceitos algébricos por trás dessa mudança: subespaços de Krylov, a
+derivação do BiCGSTAB a partir do BiCG/CGS, o mau condicionamento do
+sistema de sela (\emph{saddle-point}) de Navier--Stokes e a técnica de
+reescalonamento (equilibração) que o torna solúvel por esse método.
+\end{abstract}
+
+\tableofcontents
+
+% =====================================================================
+\section{Contexto e motivação}
+% =====================================================================
+
+O solver do \texttt{femns} monta, a cada passo de tempo, um sistema
+linear esparso $Ax=b$ vindo da discretização de Galerkin (elemento
+MINI) das equações de Navier--Stokes incompressíveis com avanço
+temporal por Euler implícito. Até a versão anterior, esse sistema era
+resolvido convertendo $A$ para uma matriz densa
+(\texttt{A.to\_dense()}) e chamando \texttt{torch.linalg.solve}. Isso
+funciona, mas tem custo $O(n^3)$ no tamanho do sistema $n$ e desperdiça
+toda a esparsidade da matriz -- na malha de teste (Poiseuille,
+$n\approx 19{,}000$ incógnitas) o solve denso levava
+${\approx}6{,}5\,\text{s}$ por passo de tempo, mesmo rodando na GPU.
+
+A motivação imediata para mudar isso foi rodar o projeto em uma GPU
+AMD (Radeon RX~6750~XT, via ROCm). Ao investigar solvers esparsos
+nativos do PyTorch, encontramos que \texttt{torch.sparse.spsolve}
+existe, mas falha explicitamente em builds ROCm:
+
+\begin{quote}
+\ttfamily\small
+RuntimeError: Calling linear solver with sparse tensors requires
+compiling PyTorch with CUDA cuDSS and is not supported in ROCm build.
+\end{quote}
+
+Ou seja, a única via de solver esparso ``de fábrica'' do PyTorch é
+exclusiva de CUDA/NVIDIA (usa a biblioteca cuDSS por baixo). Como
+alternativa portátil -- que funciona igual em CUDA, ROCm ou CPU --,
+implementamos um método iterativo de Krylov (BiCGSTAB) inteiramente
+com as operações de tensor esparso que o PyTorch já suporta em
+qualquer \emph{backend}: produto matriz-vetor esparso
+(\texttt{torch.mm}) e álgebra densa de vetor.
+
+% =====================================================================
+\section{O sistema linear de Navier--Stokes discretizado}
+\label{sec:sistema}
+% =====================================================================
+
+Antes de discutir o solver, vale relembrar a estrutura algébrica do
+sistema que ele precisa resolver, porque é essa estrutura que dita
+quais métodos se aplicam.
+
+A cada passo de tempo, com o termo advectivo linearizado na
+velocidade do passo anterior, o \texttt{femns} monta o sistema em
+blocos
+\begin{equation}
+  \label{eq:sistema-original}
+  A\,x =
+  \underbrace{\begin{pmatrix}
+    \tfrac{1}{\Delta t}M + \tfrac{1}{Re}K & 0 & -G_x \\[2pt]
+    0 & \tfrac{1}{\Delta t}M + \tfrac{1}{Re}K & -G_y \\[2pt]
+    D_x & D_y & 0
+  \end{pmatrix}}_{A}
+  \begin{pmatrix} \vx \\ \vy \\ p \end{pmatrix}
+  =
+  \begin{pmatrix} b_{\vx} \\ b_{\vy} \\ b_p \end{pmatrix} = b,
+\end{equation}
+onde $M$ é a matriz de massa, $K$ a de rigidez (laplaciano) do
+elemento MINI, $G_x,G_y$ os operadores de gradiente discreto e
+$D_x=-G_x^\top$, $D_y=-G_y^\top$ o operador de divergência (restrição
+de incompressibilidade). Chamando $A_{vv} = \tfrac{1}{\Delta t}M +
+\tfrac{1}{Re}K$ o bloco de velocidade, note que:
+
+\begin{itemize}
+  \item $A$ é \textbf{simétrica}: o bloco $(p,\vx)$ é $D_x = -G_x^\top$,
+    exatamente a transposta do bloco $(\vx,p) = -G_x$ -- o mesmo vale
+    para $\vy$. Isso é a estrutura clássica de um sistema de
+    \emph{sela} (\emph{saddle-point}) proveniente de uma formulação
+    mista (velocidade--pressão).
+  \item $A$ \textbf{não é definida positiva}: o bloco $(p,p)$ é
+    identicamente nulo (a equação de continuidade não tem termo de
+    pressão), então $A$ tem autovalores positivos e negativos --  é
+    simétrica \emph{indefinida}.
+\end{itemize}
+
+Essa segunda propriedade é decisiva: o método do Gradiente Conjugado
+(CG), a escolha natural para sistemas simétricos, exige que a matriz
+seja \textbf{definida positiva} para garantir convergência (e para que
+as quantidades computadas, como o passo ótimo, sejam bem definidas). Como
+$A$ aqui é indefinida, CG não se aplica diretamente -- seria preciso
+MINRES (que lida com simétrica indefinida) ou um método para matrizes
+não-simétricas em geral, como o \textbf{BiCGSTAB}, que foi a escolha
+feita aqui por ser mais amplamente aplicável (não assume nem exige
+simetria) e por ter uma implementação direta em termos de produtos
+matriz-vetor.
+
+% =====================================================================
+\section{Métodos de subespaço de Krylov}
+% =====================================================================
+
+Métodos de Krylov resolvem $Ax=b$ construindo, a partir de um chute
+inicial $x_0$ e do resíduo $r_0 = b - Ax_0$, uma sequência de
+aproximações $x_m$ tais que o erro $x_m - x_0$ pertence ao
+\emph{subespaço de Krylov}
+\begin{equation}
+  \mathcal{K}_m(A, r_0) = \operatorname{span}\{r_0, Ar_0, A^2r_0,
+  \dots, A^{m-1}r_0\}.
+\end{equation}
+Equivalentemente, o resíduo $r_m = b - Ax_m$ pode sempre ser escrito
+como $r_m = \varphi_m(A)\,r_0$ para algum polinômio $\varphi_m$ de grau
+$m$ com $\varphi_m(0)=1$. Diferentes métodos de Krylov correspondem a
+diferentes critérios para escolher esse polinômio:
+
+\begin{itemize}
+  \item \textbf{CG}: escolhe $\varphi_m$ que minimiza $\|r_m\|_{A^{-1}}$
+    (exige $A$ simétrica definida positiva);
+  \item \textbf{GMRES}: escolhe $\varphi_m$ que minimiza $\|r_m\|_2$
+    diretamente (aplica-se a qualquer $A$ não-singular, mas o custo de
+    memória cresce com $m$, pois precisa guardar todos os vetores de
+    Krylov anteriores);
+  \item \textbf{BiCG} e seus descendentes (CGS, \textbf{BiCGSTAB}):
+    escolhem $\varphi_m$ por uma relação de recorrência de custo
+    constante por iteração (não crescente com $m$), à custa de não
+    garantir minimização monotônica do resíduo -- é a família usada
+    aqui.
+\end{itemize}
+
+% =====================================================================
+\section{Do BiCG ao BiCGSTAB}
+% =====================================================================
+
+\subsection{BiCG: o problema com \texorpdfstring{$A^\top$}{A transposta}}
+
+O \textbf{Gradiente Bi-Conjugado} (BiCG, Fletcher 1976) generaliza o CG
+para matrizes não-simétricas introduzindo um sistema ``sombra''
+$A^\top x^\ast = b^\ast$ e um resíduo sombra arbitrário $\hat r_0$
+(tipicamente $\hat r_0 = r_0$). O método gera duas sequências
+biortogonais, $r_m = \varphi_m(A) r_0$ e $\hat r_m =
+\varphi_m(A^\top)\hat r_0$, tais que $(\hat r_i, r_j) = 0$ para $i\ne
+j$. Isso funciona, mas tem duas desvantagens práticas: (i) exige um
+produto matriz-vetor com $A^\top$ a cada iteração, dobrando o custo (e
+sendo inconveniente quando só se tem acesso a $A$ via sua ação, não
+sua transposta explícita); (ii) a convergência do resíduo costuma ser
+irregular, com oscilações grandes.
+
+\subsection{CGS: elimina \texorpdfstring{$A^\top$}{A transposta}, mas amplifica ruído}
+
+O \textbf{Gradiente Conjugado ao Quadrado} (CGS, Sonneveld 1989)
+observa que, como as quantidades do BiCG só entram em produtos
+internos que envolvem $\varphi_m(A^\top)\hat r_0$ contra outros
+vetores, é possível reescrever a recorrência de forma que o resíduo
+efetivo passe a ser $r_m = \varphi_m(A)^2 r_0$ -- ou seja, o mesmo
+polinômio \emph{aplicado duas vezes}, usando só $A$ (nunca $A^\top$).
+Isso resolve o problema (i), mas piora o (ii): elevar $\varphi_m$ ao
+quadrado também eleva ao quadrado qualquer componente de crescimento
+que o polinômio tenha, tornando a convergência do CGS tipicamente
+\emph{mais} errática que a do BiCG, com picos de resíduo grandes no
+meio do processo (podendo até causar problemas numéricos em precisão
+finita).
+
+\subsection{BiCGSTAB: estabiliza o quadrado}
+
+O \textbf{BiCGSTAB} (van der Vorst, 1992) resolve o problema (ii) do
+CGS substituindo o \emph{segundo} $\varphi_m$ (o que o CGS aplica de
+novo, gerando o quadrado) por uma sequência de polinômios de grau~1
+$\psi_m$, escolhidos localmente a cada iteração para minimizar a norma
+do resíduo intermediário -- uma espécie de passo de GMRES(1)/mínimos
+quadrados local, intercalado com a recorrência do tipo BiCG. O
+resíduo final é
+\begin{equation}
+  r_m = \psi_m(A)\,\varphi_m(A)\,r_0,
+\end{equation}
+onde $\psi_m(A) = \prod_{j=1}^m (I - \omega_j A)$ é construído
+incrementalmente: a cada iteração $j$, depois de obter um resíduo
+intermediário $s$ (análogo ao que o CGS usaria diretamente), calcula-se
+\begin{equation}
+  \label{eq:omega}
+  \omega_j = \frac{(As,\,s)}{(As,\,As)},
+\end{equation}
+que é exatamente o escalar que minimiza $\|s - \omega\, As\|_2$ sobre
+$\omega\in\R$ -- um passo de descida ótimo de grau~1. Isso mantém o
+custo por iteração igual ao do CGS (dois produtos matriz-vetor com
+$A$, nunca com $A^\top$), mas com convergência muito mais suave e
+estável na prática, sendo hoje o método padrão de facto para sistemas
+não-simétricos (ou simétricos indefinidos, como o nosso) quando GMRES
+completo é caro demais em memória.
+
+% =====================================================================
+\section{O algoritmo BiCGSTAB (com pré-condicionamento)}
+\label{sec:algoritmo}
+% =====================================================================
+
+A seguir, o BiCGSTAB pré-condicionado à direita, na forma implementada
+em \texttt{femns.krylov.bicgstab} (numeração de linha entre
+colchetes). O pré-condicionador $K^{-1}$ é aplicado às direções de
+busca $p,s$ antes de multiplicá-las por $A$ -- se $K=I$ (identidade),
+recupera-se o BiCGSTAB sem pré-condicionamento.
+
+\begingroup
+\renewcommand{\arraystretch}{1.15}
+\begin{quote}
+\textbf{Entrada:} $A$, $b$, chute inicial $x_0$, tolerância
+$\text{tol}$, pré-condicionador $K^{-1}(\cdot)$.
+
+\begin{align*}
+  &[1]\quad r_0 \gets b - Ax_0; \qquad \hat r_0 \gets r_0 \text{ (arbitrário)} \\
+  &[2]\quad \rho_0 \gets \alpha \gets \omega_0 \gets 1; \qquad v_0 \gets p_0 \gets 0 \\
+  &[3]\quad \text{para } j = 1, 2, 3, \dots \text{ faça} \\
+  &[4]\qquad \rho_j \gets (\hat r_0,\, r_{j-1}) \\
+  &[5]\qquad \beta \gets (\rho_j / \rho_{j-1})\,(\alpha / \omega_{j-1}) \\
+  &[6]\qquad p_j \gets r_{j-1} + \beta\,(p_{j-1} - \omega_{j-1} v_{j-1}) \\
+  &[7]\qquad y \gets K^{-1} p_j \qquad \text{\small(pré-condiciona a direção de busca)} \\
+  &[8]\qquad v_j \gets A y \\
+  &[9]\qquad \alpha \gets \rho_j / (\hat r_0,\, v_j) \\
+  &[10]\quad\ s \gets r_{j-1} - \alpha\, v_j \\
+  &[11]\quad\ \text{se } \|s\|/\|b\| \le \text{tol}: \; x_j \gets x_{j-1} + \alpha y; \; \textbf{pare} \\
+  &[12]\quad\ z \gets K^{-1} s \qquad \text{\small(pré-condiciona o resíduo intermediário)} \\
+  &[13]\quad\ t \gets A z \\
+  &[14]\quad\ \omega_j \gets (t, s) / (t, t) \qquad \text{\small(Eq.~\eqref{eq:omega}: passo de descida ótimo)} \\
+  &[15]\quad\ x_j \gets x_{j-1} + \alpha y + \omega_j z \\
+  &[16]\quad\ r_j \gets s - \omega_j t \\
+  &[17]\quad\ \text{se } \|r_j\|/\|b\| \le \text{tol}: \; \textbf{pare}
+\end{align*}
+\end{quote}
+\endgroup
+
+Cada iteração custa exatamente \textbf{dois} produtos matriz-vetor
+esparsos ($Ay$ e $Az$) mais um punhado de produtos internos e
+combinações lineares de vetores densos -- todas operações que já
+confirmamos funcionar sem ressalvas na build ROCm do PyTorch. É por
+isso que o método é atrativo aqui: não precisamos de nenhuma biblioteca
+de fatoração esparsa específica do fabricante da GPU.
+
+\subsection{Por que não usamos o pré-condicionador de Jacobi}
+
+A escolha mais simples de $K^{-1}$ é o pré-condicionador de
+\textbf{Jacobi} (diagonal): $K^{-1}v = D^{-1}v$, onde $D =
+\operatorname{diag}(A)$. Implementamos essa opção
+(\texttt{jacobi\_preconditioner} em \texttt{krylov.py}), com um cuidado
+extra: como o bloco $(p,p)$ de $A$ é identicamente nulo
+(Seção~\ref{sec:sistema}), todo grau de liberdade de pressão livre
+(sem condição de contorno) tem $D_{ii}=0$ -- nesses casos o
+pré-condicionador simplesmente não escala aquela componente (fator
+$1$), em vez de dividir por zero.
+
+Testamos empiricamente no sistema real (malha do Poiseuille,
+$n\approx 19{,}000$) e o Jacobi \emph{piorou} a convergência em
+relação a não usar pré-condicionador algum, depois de aplicado o
+reescalonamento da Seção~\ref{sec:reescalonamento} (900 iterações sem
+Jacobi contra 1328 com Jacobi para a mesma tolerância). Isso não chega
+a ser surpreendente: pré-condicionadores diagonais são conhecidos por
+serem insuficientes para sistemas de sela em geral (a literatura de
+CFD usa tipicamente pré-condicionadores de bloco, baseados no
+complemento de Schur do sistema); aqui, uma vez resolvido o problema
+de escala entre blocos, o ganho adicional do Jacobi não se pagou.
+Por isso o \texttt{femns} não usa pré-condicionador na chamada de
+produção (\texttt{solver.time\_step}), embora a função continue
+disponível em \texttt{krylov.py} para uso futuro ou outros problemas.
+
+% =====================================================================
+\section{O sistema de sela é mal condicionado: reescalonamento de pressão}
+\label{sec:reescalonamento}
+% =====================================================================
+
+\subsection{O diagnóstico}
+
+Ao rodar o BiCGSTAB (sem pré-condicionador e com Jacobi) no sistema
+real, encontramos um resultado enganoso: o resíduo relativo caía para
+valores aparentemente razoáveis, mas a solução obtida tinha até
+$90\%$ de erro relativo frente à solução de referência (o antigo solve
+denso). Resíduo pequeno não implicar solução correta é a assinatura
+clássica de um sistema \textbf{mal condicionado}: pequenas perturbações
+no resíduo (inevitáveis em ponto flutuante, ou por convergência
+prematura) correspondem a grandes perturbações na solução.
+
+Medindo a norma de Frobenius dos blocos de \eqref{eq:sistema-original}
+na malha de teste:
+\begin{equation}
+  \|A_{vv}\|_F = \left\|\tfrac{1}{\Delta t}M + \tfrac{1}{Re}K\right\|_F
+  \approx 828,
+  \qquad
+  \left\|\begin{pmatrix}G_x\\G_y\end{pmatrix}\right\|_F \approx 0{,}71,
+\end{equation}
+um desbalanço de escala de ${\sim}1000\times$ entre o bloco de
+velocidade e o bloco de acoplamento de pressão -- causado
+essencialmente pelo fator $1/\Delta t$ ($\Delta t = 0{,}001 \Rightarrow
+1/\Delta t = 1000$) que multiplica $M$ no bloco de velocidade, mas não
+aparece nos blocos de acoplamento $G_x, G_y$. Um sistema com blocos de
+magnitude tão díspares tem número de condição muito maior do que
+qualquer um dos blocos isoladamente sugeriria, e é exatamente esse
+tipo de desbalanço que um pré-condicionador puramente diagonal (Jacobi)
+não corrige, porque ele reescala \emph{linha a linha}, sem levar em
+conta a relação entre blocos.
+
+\subsection{A técnica: reescalonamento diagonal (equilibração)}
+
+A correção é uma \textbf{mudança de variável} simples. Seja $\beta =
+\|A_{vv}\|_F / \|(G_x;G_y)\|_F$ e defina a matriz de escala
+\begin{equation}
+  S = \operatorname{diag}(I_n,\, I_n,\, \beta I_m),
+\end{equation}
+onde $n = n_{\text{pontos}}+n_{\text{elem}}$ (graus de liberdade de
+velocidade, incluindo o nó de bolha do elemento MINI) e $m =
+n_{\text{pontos}}$ (graus de liberdade de pressão). Como $A$ é
+simétrica (Seção~\ref{sec:sistema}), aplicamos um reescalonamento
+\textbf{simétrico}, resolvendo o sistema equivalente
+\begin{equation}
+  \tilde A\,\tilde x = \tilde b,
+  \qquad
+  \tilde A = S A S,
+  \qquad
+  \tilde x = S^{-1}x,
+  \qquad
+  \tilde b = S b,
+\end{equation}
+que tem exatamente a mesma solução física $x$ (basta recuperar $x = S
+\tilde x$ ao final), mas com blocos mais equilibrados:
+\begin{equation}
+  \tilde A =
+  \begin{pmatrix}
+    A_{vv} & 0 & -\beta G_x \\
+    0 & A_{vv} & -\beta G_y \\
+    \beta D_x & \beta D_y & 0
+  \end{pmatrix},
+  \qquad
+  \tilde x = \begin{pmatrix}\vx\\ \vy\\ \tilde p\end{pmatrix},
+  \quad \tilde p \coloneqq p/\beta.
+\end{equation}
+Ou seja: resolvemos o sistema para uma \textbf{pressão escalada}
+$\tilde p = p/\beta$, e recuperamos a pressão física $p = \beta\,
+\tilde p$ ao final de cada passo de tempo. Os blocos de acoplamento
+($-\beta G_x$, $-\beta G_y$, $\beta D_x$, $\beta D_y$) ficam multiplicados
+por $\beta$, trazendo sua magnitude para perto da do bloco de
+velocidade $A_{vv}$ (que não é alterado, pois o bloco $(p,p)$ é nulo e
+$\beta^2\cdot 0 = 0$, então não há inconsistência ali).
+
+\paragraph{Condições de contorno de pressão.} Linhas de $A$
+correspondentes a nós com condição de Dirichlet de pressão (ex.:
+$p=0$ na saída do Poiseuille) são sobrescritas por
+\texttt{apply\_boundary\_conditions} \emph{depois} da montagem de
+$\tilde A$, virando uma linha identidade $1\cdot \tilde p_i =
+\text{alvo}$. Como essa linha não passa pelo fator $\beta$ do bloco de
+continuidade, o alvo correto para impor $p_i = p_{cc,i}$ fisicamente é
+$\text{alvo} = p_{cc,i}/\beta$ -- é exatamente o que
+\texttt{solver.time\_step} faz (\texttt{b\_inf[p\_cc\_pts] =
+p\_cc[p\_cc\_pts] / beta}).
+
+\subsection{Resultado}
+
+Repetindo o mesmo experimento com o sistema reescalonado $\tilde A$
+(sem nenhum pré-condicionador adicional), o BiCGSTAB convergiu para a
+tolerância $\text{tol}=10^{-8}$ em $900$ iterações, com erro relativo
+\emph{nulo} (dentro da precisão de ponto flutuante) frente à solução
+de referência do solve denso -- confirmando que o problema era
+puramente de condicionamento/escala, não um erro na formulação do
+sistema ou no BiCGSTAB em si.
+
+% =====================================================================
+\section{Warm-start entre passos de tempo}
+% =====================================================================
+
+Como o método é iterativo, o chute inicial $x_0$ afeta diretamente
+quantas iterações são necessárias: o resíduo inicial é $r_0 = b -
+Ax_0$, e o número de iterações do BiCGSTAB está relacionado ao grau do
+polinômio $\varphi_m$ necessário para que $\varphi_m(A) r_0$ fique
+pequeno -- quanto menor $\|r_0\|$ (isto é, quanto mais perto $x_0$ já
+estiver da solução verdadeira), menos iterações tendem a ser
+necessárias.
+
+Como o \texttt{femns} usa Euler implícito com $\Delta t$ pequeno, a
+solução de um passo de tempo $x^{(k)}$ é, por construção, próxima da
+solução do passo seguinte $x^{(k+1)}$ (o lado direito $b^{(k+1)}$
+muda pouco em relação a $b^{(k)}$, pois depende de $v_x^{(k)},
+v_y^{(k)}$ apenas através do termo advectivo). Por isso,
+\texttt{scripts/run\_simulation.py} usa a solução do passo anterior
+(já com as condições de contorno aplicadas, incluindo a conversão
+$\tilde p = p/\beta$) como \texttt{x0} do próximo passo, em vez de
+recomeçar do vetor nulo a cada vez.
+
+Na prática, isso reduziu o número de iterações de forma consistente ao
+longo dos passos de tempo (Tabela~\ref{tab:warmstart}): a primeira
+solução (chute inicial próximo de zero) precisou de mais iterações que
+as seguintes, que já partem de um estado bem próximo do novo
+equilíbrio.
+
+\begin{table}[h]
+\centering
+\caption{Iterações do BiCGSTAB com warm-start ao longo de 5 passos de
+tempo consecutivos (malha do Poiseuille, $n\approx 19{,}000$).}
+\label{tab:warmstart}
+\begin{tabular}{@{}crrr@{}}
+\toprule
+Passo & Iterações & Resíduo relativo final & Tempo acumulado (s) \\
+\midrule
+1 & 800 & $7{,}4\times10^{-9}$ & 0,44 \\
+2 & 747 & $8{,}0\times10^{-9}$ & 0,79 \\
+3 & 734 & $6{,}1\times10^{-9}$ & 1,14 \\
+4 & 693 & $1{,}0\times10^{-8}$ & 1,46 \\
+5 & 668 & $7{,}5\times10^{-9}$ & 1,77 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% =====================================================================
+\section{Resumo das mudanças no código}
+% =====================================================================
+
+\begin{itemize}
+  \item \textbf{Novo módulo \texttt{src/femns/krylov.py}}: implementa
+    \texttt{bicgstab} (Seção~\ref{sec:algoritmo}) e
+    \texttt{jacobi\_preconditioner}, ambos agnósticos de \emph{device}
+    -- funcionam sobre qualquer tensor esparso CSR/COO do PyTorch,
+    independente do \emph{backend} (CPU, CUDA, ROCm).
+
+  \item \textbf{\texttt{src/femns/solver.py}}: \texttt{build\_system\_matrix}
+    ganhou o parâmetro \texttt{beta} (fator de reescalonamento,
+    Seção~\ref{sec:reescalonamento}) e a função nova
+    \texttt{pressure\_scale\_factor}, que calcula $\beta$ a partir das
+    normas de $A_{vv}$ e $(G_x;G_y)$. \texttt{time\_step} passou a
+    resolver o sistema via \texttt{bicgstab} em vez de
+    \texttt{torch.linalg.solve(A.to\_dense(), b)}, recebendo/devolvendo
+    o vetor de \emph{warm-start} \texttt{x0} entre chamadas.
+
+  \item \textbf{\texttt{scripts/run\_simulation.py}}: calcula $\beta$
+    uma única vez (a matriz $A$ não muda durante a simulação), mantém
+    \texttt{x0} entre iterações do laço de tempo, e reporta
+    \texttt{bicg\_iters}/\texttt{residual} na barra de progresso para
+    diagnóstico. Uma colisão de nome foi corrigida no processo: a
+    variável \texttt{x0} do recurso de ``ponto móvel'' (coordenada de
+    referência do nó deslocado) foi renomeada para
+    \texttt{ponto\_x0}/\texttt{ponto\_y0}, para não conflitar com o
+    \texttt{x0} do \emph{warm-start} do solver.
+
+  \item \textbf{\texttt{tests/test\_krylov.py}} (novo): valida o
+    BiCGSTAB contra \texttt{torch.linalg.solve} em sistemas pequenos
+    não-simétricos e diagonalmente dominantes, confirma que o
+    \emph{warm-start} reduz iterações, e testa o caso degenerado de
+    lado direito nulo.
+\end{itemize}
+
+% =====================================================================
+\section{Validação de desempenho e correção}
+% =====================================================================
+
+\begin{table}[h]
+\centering
+\caption{Comparação entre as abordagens testadas no sistema real
+($n\approx 19{,}000$, GPU AMD RX~6750~XT via ROCm).}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Abordagem & Iterações & Resíduo relativo & Erro vs.\ solve denso \\
+\midrule
+Solve denso (\texttt{torch.linalg.solve}) & -- & -- & (referência) \\
+BiCGSTAB sem reescalonamento & 5000 (não convergiu) & $2{,}78$ & $1213\%$ \\
+BiCGSTAB + Jacobi, sem reescalonamento & 4694 (estagnou) & $4{,}7\times10^{-3}$ & $91\%$ \\
+BiCGSTAB + reescalonamento & 900 & $6{,}7\times10^{-9}$ & ${\approx}0\%$ \\
+BiCGSTAB + reescalonamento + Jacobi & 1328 & $7{,}0\times10^{-9}$ & ${\approx}0\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Com reescalonamento e \emph{warm-start}, o tempo por passo de tempo
+caiu de ${\approx}6{,}5\,\text{s}$ (solve denso) para
+${\approx}0{,}35\,\text{s}$ (BiCGSTAB) na mesma malha e GPU -- um ganho
+de ${\sim}18\times$ --, com a simulação completa do escoamento de
+Poiseuille produzindo posições de nó e campos de velocidade/pressão
+idênticos aos da versão anterior (validado ponto a ponto na trajetória
+do nó de teste ao longo de várias iterações).
+
+% =====================================================================
+\section{Conclusão e limitações}
+% =====================================================================
+
+A troca do solve denso por BiCGSTAB só funcionou depois de identificar
+e corrigir o mau condicionamento estrutural do sistema de sela --
+sem o reescalonamento de pressão, nenhuma variante testada (com ou sem
+Jacobi) convergia para a solução correta, apesar de superficialmente
+parecer convergir (resíduo pequeno, solução errada). Isso reforça um
+ponto geral de métodos iterativos: \textbf{sempre validar a solução
+contra uma referência independente}, não só olhar o resíduo reportado
+pelo próprio método.
+
+Limitações conhecidas desta implementação:
+\begin{itemize}
+  \item $\text{tol}=10^{-8}$ e $\text{max\_iter}=2000$ estão fixos como
+    padrão em \texttt{time\_step}, não expostos no config \texttt{yaml}
+    do projeto;
+  \item não há pré-condicionador de bloco/complemento de Schur, que
+    tende a ser necessário para malhas bem maiores (o reescalonamento
+    escalar aqui resolve o desbalanço de \emph{ordem de grandeza} entre
+    blocos, mas não a estrutura fina do complemento de Schur $D_x
+    A_{vv}^{-1} G_x + D_y A_{vv}^{-1} G_y$);
+  \item o fator $\beta$ é recalculado apenas uma vez por simulação (a
+    matriz $A$ é constante ao longo do tempo neste modelo); em uma
+    formulação onde $A$ mudasse a cada passo (malha móvel completa,
+    Reynolds variável, etc.), $\beta$ precisaria ser recalculado
+    também.
+\end{itemize}
+
+\end{document}

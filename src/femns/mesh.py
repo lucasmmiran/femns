@@ -16,22 +16,63 @@ class Mesh:
     IEN: np.ndarray
     IENbound: np.ndarray
     IENboundElem: list
+    IENpoint: np.ndarray
+    IENpointElem: list
     boundNames: list
     npoints: int
     ne: int
 
 
-def read_mesh(path: str) -> Mesh:
-    """Le uma malha .msh (triangulos, Nr. 1) com arestas de contorno marcadas (Nr. 0)."""
-    raw = meshio.read(path)
+def _blocos_do_tipo(raw: meshio.Mesh, tipo: str) -> list[int]:
+    """Indices (na lista de cell blocks do meshio) dos blocos de um `tipo` (ex. 'triangle').
 
+    Malhas do Gmsh podem ter blocos em qualquer ordem/quantidade -- ex.
+    `lid.msh` tem um bloco extra `vertex` (1 no so, ponto de referencia de
+    pressao para fixar o "zero" numa cavidade tampada sem saida fisica de
+    fluido) antes do bloco `line`, o que quebrava a leitura por indice fixo
+    (`raw.cells[0]`/`raw.cells[1]`) usada anteriormente.
+    """
+    return [i for i, cb in enumerate(raw.cells) if cb.type == tipo]
+
+
+def _nomes_fisicos(raw: meshio.Mesh, boundNames: list, indices_blocos: list[int]) -> list:
+    """Nome do physical group de cada celula dos blocos em `indices_blocos`, concatenados."""
+    nomes = []
+    for i in indices_blocos:
+        tags = raw.cell_data["gmsh:physical"][i] - 1
+        nomes.extend(boundNames[tag] for tag in tags)
+    return nomes
+
+
+def read_mesh(path: str) -> Mesh:
+    """Le uma malha .msh (triangulos + arestas/pontos de contorno marcados por physical group)."""
+    return _mesh_from_raw(meshio.read(path))
+
+
+def _mesh_from_raw(raw: meshio.Mesh) -> Mesh:
+    """Constroi o `Mesh` a partir de um `meshio.Mesh` ja lido -- separado de `read_mesh` pra
+    poder testar a selecao de blocos por tipo sem precisar escrever/ler um `.msh` de verdade.
+
+    Blocos de celula sao identificados pelo tipo (`triangle`, `line`,
+    `vertex`), nao por posicao -- `IENpoint`/`IENpointElem` (do bloco
+    `vertex`, opcional) cobrem contornos definidos por um unico no, como o
+    ponto de referencia de pressao de `lid.msh`; ficam vazios se a malha
+    nao tiver esse bloco (caso de `poiseuille.msh`/`degrau.msh`).
+    """
     X = raw.points[:, 0]
     Y = raw.points[:, 1]
-    IEN = raw.cells[1].data
-    IENbound = raw.cells[0].data
-    IENboundTypeElem = list(raw.cell_data["gmsh:physical"][0] - 1)
     boundNames = list(raw.field_data.keys())
-    IENboundElem = [boundNames[elem] for elem in IENboundTypeElem]
+
+    idx_tri = _blocos_do_tipo(raw, "triangle")
+    IEN = np.concatenate([raw.cells[i].data for i in idx_tri], axis=0)
+
+    idx_line = _blocos_do_tipo(raw, "line")
+    IENbound = np.concatenate([raw.cells[i].data for i in idx_line], axis=0) if idx_line else np.empty((0, 2), dtype=int)
+    IENboundElem = _nomes_fisicos(raw, boundNames, idx_line)
+
+    idx_vertex = _blocos_do_tipo(raw, "vertex")
+    IENpoint = np.concatenate([raw.cells[i].data for i in idx_vertex], axis=0).reshape(-1) if idx_vertex else np.empty(0, dtype=int)
+    IENpointElem = _nomes_fisicos(raw, boundNames, idx_vertex)
 
     return Mesh(
         raw=raw,
@@ -40,6 +81,8 @@ def read_mesh(path: str) -> Mesh:
         IEN=IEN,
         IENbound=IENbound,
         IENboundElem=IENboundElem,
+        IENpoint=IENpoint,
+        IENpointElem=IENpointElem,
         boundNames=boundNames,
         npoints=len(X),
         ne=IEN.shape[0],

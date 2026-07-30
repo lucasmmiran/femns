@@ -327,38 +327,71 @@ Comparado ao Passo 2, este é simples: uma vez que se sabe o elemento
 e as coordenadas baricêntricas $(\lambda_i, \lambda_j, \lambda_k)$ de
 $\mathbf{x}_d$, resta avaliar o campo $\vx^n, \vy^n$ nesse ponto.
 
-\paragraph{Fórmula (P1 + bolha).} O ponto importante é que
-$\vx^n,\vy^n$ \emph{já são} funções do espaço MINI -- a mesma base
-usada para montar $K, M, G_x, G_y$ em \texttt{assembly.py} --, então
-interpolar não é ajustar uma função nova aos valores nodais, é
-simplesmente \textbf{avaliar a função que já existe} nesse ponto,
-usando sua própria expansão de base:
+\paragraph{Fórmula (base nodal, P1 corrigido + bolha).} O ponto
+importante é que $\vx^n,\vy^n$ \emph{já são} funções do espaço MINI --
+a mesma base usada para montar $K, M, G_x, G_y$ em
+\texttt{assembly.py} --, então interpolar não é ajustar uma função
+nova aos valores nodais, é simplesmente \textbf{avaliar a função que
+já existe} nesse ponto, usando sua própria expansão de base.
+\textbf{Correção importante} (a versão original deste documento tinha
+isso errado -- ver nota no fim desta seção): as funções de forma não
+são a base "crua" $\{\lambda_i,\lambda_j,\lambda_k,
+27\lambda_i\lambda_j\lambda_k\}$, e sim a base \emph{nodal}
 \[
-v_\star(\mathbf{x}_d) = \lambda_i v_i + \lambda_j v_j + \lambda_k v_k
-+ \underbrace{27\,\lambda_i\lambda_j\lambda_k}_{\text{bolha}}\, v_b,
+N_i = \lambda_i - 9\lambda_i\lambda_j\lambda_k, \qquad
+N_b = 27\,\lambda_i\lambda_j\lambda_k
+\]
+(e ciclicamente $N_j, N_k$), de modo que
+\[
+v_\star(\mathbf{x}_d) = N_i\,v_i + N_j\,v_j + N_k\,v_k + N_b\,v_b
+= \lambda_i v_i+\lambda_j v_j+\lambda_k v_k + 9\lambda_i\lambda_j\lambda_k\big(3v_b-(v_i+v_j+v_k)\big),
 \]
 onde $v_i,v_j,v_k$ são os valores nodais nos 3 vértices do elemento e
 $v_b$ é o valor no nó de centroide desse elemento (a 4\textsuperscript{a}
-coluna de \texttt{IEN}, criada por \texttt{mesh.elem\_mini}). A função
-bolha $27\lambda_i\lambda_j\lambda_k$ é a mesma que aparece implícita
-nos coeficientes \texttt{9/10}, \texttt{27/10}, \texttt{81/10} de
-\texttt{assembly.assemble\_mini} -- vale $1$ no centroide
-($\lambda_i=\lambda_j=\lambda_k=1/3$) e $0$ em toda a borda do
-triângulo (basta um $\lambda=0$).
+coluna de \texttt{IEN}, criada por \texttt{mesh.elem\_mini}). A
+correção $9\lambda_i\lambda_j\lambda_k$ é escolhida exatamente para
+que $N_i, N_j, N_k$ zerem no centroide ($N_i(\mathbf{x}_c)=1/3-9/27=0$)
+e $N_b(\mathbf{x}_c)=1$ -- ou seja, $\{N_i,N_j,N_k,N_b\}$ tem a
+propriedade de Lagrange nos \emph{4} nós (não só nos 3 vértices), e
+$\sum N_a \equiv 1$ (partição da unidade genuína, ao contrário da base
+crua).
 
 \paragraph{Por que incluir a bolha, e o que $v_b$ significa.} Isso
 resolve a dúvida deixada em aberto numa versão anterior deste
 documento ("interpolar só a parte P1 ou incluir a bolha?"): a
 resposta é incluir, e não é uma escolha de projeto -- é uma questão
-de consistência. $v_b$ \textbf{não} é a velocidade física no ponto
-central do elemento; é o coeficiente modal da bolha na representação
-MINI do campo (por isso o método funciona mesmo $v_b$ não tendo
-interpretação nodal direta). Descartar o termo da bolha na
-interpolação seria avaliar uma função \emph{diferente} da que o
-resto do solver está de fato resolvendo -- inconsistente com a
-própria discretização. Como $\lambda_i,\lambda_j,\lambda_k$ já foram
-calculados no Passo 2, o termo extra é barato (mais uma
-multiplicação por nó).
+de consistência. E, ao contrário do que este documento afirmava antes,
+$v_b$ \textbf{é} a velocidade física no centroide do elemento --
+exatamente como $v_i,v_j,v_k$ são as velocidades físicas nos vértices
+-- porque a base é nodal nos 4 pontos, não só nos 3 vértices. Descartar
+o termo da bolha na interpolação seria avaliar uma função
+\emph{diferente} da que o resto do solver está de fato resolvendo --
+inconsistente com a própria discretização. Como $\lambda_i,\lambda_j,
+\lambda_k$ já foram calculados no Passo 2, o termo extra é barato
+(mais uma multiplicação por nó).
+
+\paragraph{Nota: correção de um erro deste documento.} A versão
+original desta seção afirmava que $v_b$ era "o coeficiente modal da
+bolha, não uma velocidade física no centroide", e usava a fórmula
+crua $v_\star=\lambda_i v_i+\lambda_j v_j+\lambda_k v_k+27\lambda_i
+\lambda_j\lambda_k v_b$ (sem a correção $9\lambda_i\lambda_j\lambda_k$
+nos termos de vértice). Isso é \textbf{tecnicamente incorreto} para
+este projeto: batendo a matriz de rigidez que a fórmula errada
+implica contra \texttt{tests/test\_assembly.py::test\_assemble\_mini\_%
+triangulo\_referencia} (verificação simbólica, entrada a entrada), só
+a base nodal acima reproduz exatamente a matriz $K$ que
+\texttt{assembly.assemble\_mini} de fato monta -- a base crua dá uma
+matriz diferente. O erro foi descoberto durante a integração em
+\texttt{solver.py} (\S\ref{sec:transicao}): com a fórmula errada, a
+pressão da simulação real divergia (mudava de sinal) já na 2ª
+iteração, porque o DOF de bolha do campo já resolvido tende a ficar
+muito próximo da média dos vértices (esperado para um DOF nodal de
+escoamento suave) -- a fórmula crua interpretava isso como bolha
+"quase igual à média" \emph{somada} à própria média, dobrando o valor
+físico no centroide. Com a base nodal corrigida, a diferença entre
+\texttt{explicit} e \texttt{semi\_lagrangian} no Poiseuille de teste
+caiu para ${\sim}10^{-4}$--$10^{-3}$ relativo, o comportamento
+fisicamente esperado.
 
 \paragraph{Higiene numérica.} A tolerância $\varepsilon$ do critério
 de parada do Passo 2 permite $\lambda_i$ ligeiramente negativa
@@ -400,9 +433,11 @@ limite).
 valores nodais arbitrários $v_i,v_j,v_k,v_b$ para um triângulo de
 referência (os mesmos usados em \texttt{tests/test\_assembly.py}),
 calcular $v_\star$ à mão para um ponto interno conhecido (ex.\ o
-próprio centroide, onde a fórmula colapsa para
-$\tfrac13(v_i+v_j+v_k) + v_b$) e comparar com a saída da função de
+próprio centroide, onde a fórmula colapsa para $v_b$ diretamente,
+propriedade de Lagrange) e comparar com a saída da função de
 interpolação -- valida a fórmula isolada do Passo 2 (localização).
+Implementado em \texttt{tests/test\_semi\_lagrangian.py} (funções
+\texttt{interpolar\_mini}/\texttt{baricentro}).
 
 \subsection{Passo 4 -- Trocar o termo convectivo em \texttt{solver.py}}
 
@@ -413,7 +448,7 @@ b_sup = (1/dt) * torch.mm(M, vx.unsqueeze(1)) - torch.mm(vg, vx.unsqueeze(1))
 \end{lstlisting}
 por algo como:
 \begin{lstlisting}[language=Python]
-vx_star, vy_star = semi_lagrangian.backtrace_and_interpolate(...)
+vx_star, vy_star = semi_lagrangian.calculo_sl(...)
 b_sup = (1/dt) * torch.mm(M, vx_star.unsqueeze(1))
 \end{lstlisting}
 A matriz $A$ (\texttt{build\_system\_matrix}) não muda -- ela já não
@@ -471,7 +506,7 @@ parâmetro novo no config (ex.\ \texttt{simulation.advection: explicit
 \texttt{reynolds}) seleciona qual caminho \texttt{time\_step} usa a
 cada passo -- \texttt{explicit} continua montando $vg$ com $G_{vx},
 G_{vy}$ como hoje, \texttt{semi\_lagrangian} usa
-\texttt{semi\_lagrangian.backtrace\_and\_interpolate}. Isso mantém as
+\texttt{semi\_lagrangian.calculo\_sl}. Isso mantém as
 matrizes $G_{vx}, G_{vy}$ em uso normalmente até a migração ser
 confirmada.
 

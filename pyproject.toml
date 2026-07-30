@@ -14,10 +14,19 @@ dependencies = [
     "scipy",
     "tqdm",
     "pyyaml",
+    "openpyxl",
 ]
 
 [project.optional-dependencies]
 test = ["pytest"]
+dev = ["ruff"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+line-length = 200  # assembly.py tem formulas de elemento finito densas, quebrar linha piora a leitura
+src = ["src", "scripts", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

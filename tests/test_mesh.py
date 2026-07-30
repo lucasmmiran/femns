@@ -1,6 +1,7 @@
+import meshio
 import numpy as np
 
-from femns.mesh import elem_mini, montar_EToE, montar_node_to_elem, montar_NToN
+from femns.mesh import _mesh_from_raw, elem_mini, montar_EToE, montar_node_to_elem, montar_NToN
 
 
 def quadrado_dois_triangulos():
@@ -62,3 +63,59 @@ def test_elem_mini_adiciona_centroide():
     assert IEN_new[0, 3] == 3
     assert X_new[3] == np.mean(X)
     assert Y_new[3] == np.mean(Y)
+
+
+def test_mesh_from_raw_acha_blocos_por_tipo_independente_da_ordem():
+    """lid.msh tem um bloco 'vertex' (ponto de referencia de pressao, cavidade
+    tampada sem saida fisica de fluido) ANTES do bloco 'line' -- a leitura
+    por indice fixo (raw.cells[0]/[1]) pegava o bloco errado. Este teste
+    monta um `meshio.Mesh` sintetico com a mesma ordem de blocos (vertex,
+    line, triangle) pra travar a selecao por tipo, sem precisar escrever/ler
+    um `.msh` de verdade (evita depender dos requisitos do writer do gmsh
+    pra `point_data`, irrelevantes pra malhas de verdade exportadas do Gmsh).
+    """
+    points = np.array([
+        [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0],
+    ])
+    cells = [
+        ("vertex", np.array([[0]])),
+        ("line", np.array([[0, 1], [1, 2], [2, 3], [3, 0]])),
+        ("triangle", np.array([[0, 1, 2], [0, 2, 3]])),
+    ]
+    cell_data = {
+        "gmsh:physical": [
+            np.array([1]),
+            np.array([2, 2, 2, 2]),
+            np.array([3, 3]),
+        ]
+    }
+    # field_data: nome -> [tag fisico, dimensao] (0=ponto, 1=linha, 2=superficie)
+    field_data = {"outlet": np.array([1, 0]), "wall": np.array([2, 1]), "surface": np.array([3, 2])}
+    raw = meshio.Mesh(points=points, cells=cells, cell_data=cell_data, field_data=field_data)
+
+    mesh = _mesh_from_raw(raw)
+
+    assert mesh.IEN.shape == (2, 3)
+    assert mesh.IENbound.shape == (4, 2)
+    assert mesh.IENboundElem == ["wall"] * 4
+    assert list(mesh.IENpoint) == [0]
+    assert mesh.IENpointElem == ["outlet"]
+    assert mesh.npoints == 4
+    assert mesh.ne == 2
+
+
+def test_mesh_from_raw_sem_bloco_vertex_fica_com_ienpoint_vazio():
+    """poiseuille.msh/degrau.msh nao tem bloco vertex -- IENpoint deve ficar vazio, nao quebrar."""
+    points = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]])
+    cells = [
+        ("line", np.array([[0, 1], [1, 2], [2, 0]])),
+        ("triangle", np.array([[0, 1, 2]])),
+    ]
+    cell_data = {"gmsh:physical": [np.array([1, 1, 1]), np.array([2])]}
+    field_data = {"wall": np.array([1, 1]), "surface": np.array([2, 2])}
+    raw = meshio.Mesh(points=points, cells=cells, cell_data=cell_data, field_data=field_data)
+
+    mesh = _mesh_from_raw(raw)
+
+    assert mesh.IENpoint.size == 0
+    assert mesh.IENpointElem == []
