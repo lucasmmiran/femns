@@ -70,6 +70,7 @@ def time_step(A: torch.Tensor, M: torch.Tensor, Gvx: torch.Tensor, Gvy: torch.Te
               vx_cc_pts: torch.Tensor, vy_cc_pts: torch.Tensor, p_cc_pts: torch.Tensor,
               npoints: int, ne: int, beta: float = 1.0, x0: torch.Tensor = None,
               vx_star: torch.Tensor = None, vy_star: torch.Tensor = None,
+              wx: torch.Tensor = None, wy: torch.Tensor = None,
               tol: float = 1e-8, max_iter: int = 2000):
     """Avanca um passo de tempo (Euler implicito).
 
@@ -85,6 +86,16 @@ def time_step(A: torch.Tensor, M: torch.Tensor, Gvx: torch.Tensor, Gvy: torch.Te
     A matriz `A` e identica nos dois casos -- ela nunca teve termo
     advectivo (ver docs/semi_lagrangian_strategy.pdf).
 
+    Malha movel (ALE): se `wx, wy` (velocidade da malha, ver
+    `moving_mesh.velocidade_malha`) forem passados, a adveccao explicita
+    usa a velocidade **relativa** `v - w` como velocidade convectiva, que
+    e' a forma ALE de `(v.grad)v` -- num referencial que se move, o que
+    transporta e' o quanto o fluido anda *em relacao a malha*. Com
+    `w = 0` (malha parada) recai exatamente no caso Euleriano. Nao tem
+    efeito no caminho semi-Lagrangeano: la a correcao de malha movel e'
+    geometrica (interpolar na malha do passo anterior, ver
+    `femns.semi_lagrangian.calculo_sl`), nao um termo a subtrair aqui.
+
     Retorna (vx, vy, p, x_next, info): os vetores fisicos com as condicoes de
     contorno aplicadas, `x_next` (vx, vy, p_tilde) para usar como `x0` no
     proximo passo, e `info` com iteracoes/residuo do BiCGSTAB.
@@ -93,8 +104,12 @@ def time_step(A: torch.Tensor, M: torch.Tensor, Gvx: torch.Tensor, Gvy: torch.Te
         b_sup = (1 / dt) * torch.mm(M, vx_star.unsqueeze(1))
         b_mid = (1 / dt) * torch.mm(M, vy_star.unsqueeze(1))
     else:
-        vx_diag = torch.diag(vx).to_sparse_csr()
-        vy_diag = torch.diag(vy).to_sparse_csr()
+        # Velocidade convectiva: v (Euleriano) ou v - w (ALE, malha movel).
+        cx = vx if wx is None else vx - wx
+        cy = vy if wy is None else vy - wy
+
+        vx_diag = torch.diag(cx).to_sparse_csr()
+        vy_diag = torch.diag(cy).to_sparse_csr()
 
         vg = torch.mm(vx_diag, Gvx) + torch.mm(vy_diag, Gvy)
 

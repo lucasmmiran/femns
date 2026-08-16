@@ -178,6 +178,52 @@ def estende_IENbound_tri6(IENbound: np.ndarray, edge_para_no: dict) -> np.ndarra
     return novo
 
 
+def area_com_sinal(IEN, X, Y):
+    """Area orientada de cada elemento (positiva se os vertices estao anti-horarios).
+
+    Existe para detectar **inversao de elemento** quando a malha se move
+    (`moving_mesh.aplicar_oscilacao`). Isso importa porque um elemento
+    invertido nao gera erro nenhum sozinho: `assembly.assemble_mini` toma
+    `abs()` da area, mas os coeficientes `bi, ci` sao calculados sem
+    `abs`, entao um elemento de orientacao trocada entra no sistema com
+    `Gx`/`Gy` de sinal errado -- silenciosamente. A convencao do projeto
+    e' `IEN[e, 0:3]` sempre anti-horario (ver `semi_lagrangian_tri`).
+
+    Funciona com `torch` ou `numpy`.
+    """
+    v1, v2, v3 = IEN[:, 0], IEN[:, 1], IEN[:, 2]
+    return 0.5 * (X[v1] * (Y[v2] - Y[v3]) + X[v2] * (Y[v3] - Y[v1]) + X[v3] * (Y[v1] - Y[v2]))
+
+
+def atualiza_nos_extras(IEN, X, Y):
+    """Reposiciona os nos extras do elemento a partir dos vertices, apos a malha se mover.
+
+    Os nos acrescentados por `elem_mini`/`elem_tri6` sao definidos
+    geometricamente pelos vertices do elemento (centroide, ponto medio de
+    aresta). Quando os vertices se deslocam -- malha movel/ALE, ver
+    `moving_mesh.aplicar_oscilacao` -- eles precisam ser recalculados, ou o
+    elemento deixa de ser o que `assembly` assume que ele e' (o centroide
+    do MINI, por exemplo, sairia de dentro do triangulo).
+
+    Decide pelo numero de colunas de `IEN` (4 = MINI, 6 = Tri6). Funciona
+    com `torch` ou `numpy` (so indexacao e media). Modifica `X`, `Y` no
+    lugar e os devolve.
+    """
+    v1, v2, v3 = IEN[:, 0], IEN[:, 1], IEN[:, 2]
+
+    if IEN.shape[1] == 4:  # MINI: centroide
+        X[IEN[:, 3]] = (X[v1] + X[v2] + X[v3]) / 3.0
+        Y[IEN[:, 3]] = (Y[v1] + Y[v2] + Y[v3]) / 3.0
+    elif IEN.shape[1] == 6:  # Tri6: pontos medios das arestas (v4=v1v2, v5=v2v3, v6=v3v1)
+        for col, (a, b) in enumerate(((v1, v2), (v2, v3), (v3, v1)), start=3):
+            X[IEN[:, col]] = (X[a] + X[b]) / 2.0
+            Y[IEN[:, col]] = (Y[a] + Y[b]) / 2.0
+    else:
+        raise ValueError(f"IEN com {IEN.shape[1]} colunas: esperado 4 (MINI) ou 6 (Tri6)")
+
+    return X, Y
+
+
 def montar_EToE(IEN: np.ndarray):
     """Monta a matriz de elementos vizinhos por face.
 

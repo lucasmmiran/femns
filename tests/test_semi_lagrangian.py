@@ -5,6 +5,7 @@ from femns.semi_lagrangian import (
     backtrace,
     baricentro,
     calculo_sl,
+    interceptar_contorno,
     interpolar_mini,
     localizar_pontos_partida,
     locate_point,
@@ -113,7 +114,7 @@ def test_localizar_pontos_partida_saltos_diferentes_na_mesma_chamada():
     yd = np.array([0.2, 0.5, -0.5])
     elem_start = np.array([0, 0, 0])
 
-    elem, lambdas = localizar_pontos_partida(xd, yd, elem_start, X, Y, IEN, EToE)
+    elem, lambdas, saida = localizar_pontos_partida(xd, yd, elem_start, X, Y, IEN, EToE)
 
     assert elem[0] == 0  # 0 saltos
     assert min(lambdas[0]) >= 0.0
@@ -122,6 +123,62 @@ def test_localizar_pontos_partida_saltos_diferentes_na_mesma_chamada():
     assert np.allclose(lambdas[1], [0.5, 0.2, 0.3])
 
     assert elem[2] == -1  # saiu do dominio
+
+    # Quem foi localizado nao tem face de saida; quem saiu tem a face registrada
+    assert (saida[0] == -1).all() and (saida[1] == -1).all()
+    assert saida[2, 0] != -1 and saida[2, 1] != -1
+
+
+def test_localizar_pontos_partida_registra_aresta_de_saida():
+    """A face de saida guardada tem que ser a aresta de contorno que a
+    caminhada de fato tentou atravessar -- e' ela que o tratamento por
+    interceptacao usa para interpolar. Aqui o pe cai reto abaixo da aresta
+    de baixo do elemento 0 (nos 0-1), entao a saida tem que ser
+    [elem=0, face=0] (convencao de montar_EToE: face f liga os vertices
+    locais f e (f+1)%3).
+    """
+    X, Y, IEN = quadrado_dois_triangulos()
+    EToE, _ = montar_EToE(IEN)
+
+    elem, _, saida = localizar_pontos_partida(
+        np.array([0.5]), np.array([-0.5]), np.array([0]), X, Y, IEN, EToE)
+
+    assert elem[0] == -1
+    assert saida[0, 0] == 0  # saiu pelo elemento 0
+    assert saida[0, 1] == 0  # pela face 0 = vertices locais 0 e 1 = nos 0 e 1 (aresta de baixo)
+    assert EToE[saida[0, 0], saida[0, 1]] == -1  # e essa face e' mesmo contorno
+
+
+def test_interceptar_contorno_valores_a_mao():
+    # Caracteristica vertical descendo de (0.25, 0.5) ate (0.25, -0.5),
+    # cruzando a aresta (0,0)-(1,0) em (0.25, 0). Como o cruzamento e'
+    # escrito como w1*B1 + w2*B2 = w1*(0,0) + w2*(1,0) = (w2, 0), tem que
+    # sair w2 = 0.25 e w1 = 0.75.
+    w1, w2, ok = interceptar_contorno(
+        xn=np.array([0.25]), yn=np.array([0.5]),
+        xd=np.array([0.25]), yd=np.array([-0.5]),
+        xb1=np.array([0.0]), yb1=np.array([0.0]),
+        xb2=np.array([1.0]), yb2=np.array([0.0]),
+    )
+
+    assert ok[0]
+    assert np.isclose(w1[0], 0.75)
+    assert np.isclose(w2[0], 0.25)
+    assert np.isclose(w1[0] + w2[0], 1.0)
+
+
+def test_interceptar_contorno_paralelo_e_degenerado():
+    # Caracteristica horizontal contra uma aresta horizontal: nao ha
+    # cruzamento bem definido (det == 0) -- tem que sair ok=False, para
+    # quem chama mandar esses nos para o fallback de Dirichlet.
+    _, _, ok = interceptar_contorno(
+        xn=np.array([0.5]), yn=np.array([0.5]),
+        xd=np.array([1.5]), yd=np.array([0.5]),
+        xb1=np.array([0.0]), yb1=np.array([0.0]),
+        xb2=np.array([1.0]), yb2=np.array([0.0]),
+    )
+
+    assert not ok[0]
 
 
 def test_interpolar_mini_centroide():
@@ -164,6 +221,11 @@ def test_calculo_sl_campo_constante():
     igual a qualquer elemento P1 comum. Com isso, a interpolacao deve
     recuperar exatamente (c,d) em qualquer ponto interno, nao importa
     onde o pe da caracteristica caia.
+
+    Fixa `fora_dominio="dirichlet"` de proposito: este teste existe para
+    cobrir os 3 caminhos *desse* fallback, entao nao deve seguir o padrao
+    do modulo (hoje `intercept`) -- se seguisse, deixaria de testar o que
+    se propoe no dia em que o padrao mudar (foi o que aconteceu).
     """
     X0, Y0, IEN0 = quadrado_dois_triangulos()
     npoints, ne = 4, 2
@@ -187,7 +249,8 @@ def test_calculo_sl_campo_constante():
     }
 
     vx_star, vy_star = calculo_sl(
-        X, Y, IEN, EToE, node_to_elem, ccName, conditions, vx, vy, dt, npoints, ne)
+        X, Y, IEN, EToE, node_to_elem, ccName, conditions, vx, vy, dt, npoints, ne,
+        fora_dominio="dirichlet")
 
     # No 0: pe da caracteristica cai dentro do elemento 0 -> interpolado, recupera (c,d)
     assert np.isclose(vx_star[0], c) and np.isclose(vy_star[0], d)
@@ -230,3 +293,85 @@ def test_calculo_sl_centroide_e_nodal():
 
     # No de centroide do elemento 0 e' o no 4 (vb=5.0) -- deve recuperar isso diretamente
     assert np.isclose(vx_star[4], 5.0, atol=1e-4)
+
+
+def test_calculo_sl_intercept_interpola_na_aresta_de_saida():
+    """Discrimina os dois tratamentos de "fora do dominio" num no onde eles
+    dao respostas diferentes, com o valor esperado calculado a mao.
+
+    O no 4 e' o centroide do elemento 0, em (2/3, 1/3). Com vx=0, vy=1 e
+    dt=0.5 o pe da caracteristica cai em (2/3, -1/6) -- fora do dominio,
+    reto abaixo da aresta de baixo (nos 0-1). O cruzamento e' em (2/3, 0),
+    isto e' 1/3 do no 0 e 2/3 do no 1, entao o modo `intercept` tem que
+    dar 1/3*vx[0] + 2/3*vx[1] = 1/3*10 + 2/3*4 = 6.0.
+
+    Sem nenhuma condicao de contorno no dict, o modo `dirichlet` nao tem
+    valor prescrito para cair e mantem o valor do proprio no (0.0) --
+    "congela" a adveccao nesse no, que e' exatamente a diferenca de
+    comportamento entre os dois.
+    """
+    X0, Y0, IEN0 = quadrado_dois_triangulos()
+    npoints, ne = 4, 2
+
+    EToE, _ = montar_EToE(IEN0)
+    node_to_elem = montar_node_to_elem(IEN0, npoints)
+    IEN, X, Y = elem_mini(IEN0, X0, Y0)
+
+    vx = np.array([10.0, 4.0, 0.0, 0.0, 0.0, 0.0])
+    vy = np.array([0.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+    dt = 0.5
+    ccName = [None, None, None, None]
+
+    vx_int, _ = calculo_sl(X, Y, IEN, EToE, node_to_elem, ccName, {}, vx, vy, dt,
+                            npoints, ne, fora_dominio="intercept")
+    vx_dir, _ = calculo_sl(X, Y, IEN, EToE, node_to_elem, ccName, {}, vx, vy, dt,
+                            npoints, ne, fora_dominio="dirichlet")
+
+    assert np.isclose(vx_int[4], 6.0)
+    assert np.isclose(vx_dir[4], 0.0)
+
+
+def test_calculo_sl_intercept_reproduz_campo_linear_na_saida():
+    """A interpolacao na aresta de saida e' exata para campo linear -- nao e'
+    aproximacao. Sobre uma aresta uma coordenada baricentrica e' zero, a
+    correcao de bolha `9*li*lj*lk` do MINI se anula e a base vira P1 puro
+    (ver `interpolar_mini`), entao interpolar so nos dois vertices da
+    aresta reproduz qualquer campo linear exatamente no ponto de
+    cruzamento.
+
+    Aqui vx = X em todo DOF (campo linear). O no 4 (centroide, em
+    (2/3,1/3)) tem entao vx=2/3 e vy=1, e com dt=1/2 o pe cai em
+    (1/3,-1/6) -- fora do dominio. A reta (2/3,1/3)->(1/3,-1/6) cruza
+    a aresta de baixo (y=0) em x = 4/9, logo vx_star[4] tem que dar
+    exatamente 4/9 (o valor do campo linear no ponto de cruzamento).
+    """
+    X0, Y0, IEN0 = quadrado_dois_triangulos()
+    npoints, ne = 4, 2
+
+    EToE, _ = montar_EToE(IEN0)
+    node_to_elem = montar_node_to_elem(IEN0, npoints)
+    IEN, X, Y = elem_mini(IEN0, X0, Y0)
+
+    vx = X.copy()  # campo linear vx = x, em todo DOF (base nodal)
+    vy = np.zeros(npoints + ne)
+    vy[4] = 1.0  # so o no 4 e' empurrado para fora, pela aresta de baixo
+
+    vx_star, _ = calculo_sl(X, Y, IEN, EToE, node_to_elem, [None] * npoints, {},
+                             vx, vy, dt=0.5, npoints=npoints, ne=ne, fora_dominio="intercept")
+
+    assert np.isclose(vx_star[4], 4.0 / 9.0)
+
+
+def test_calculo_sl_fora_dominio_invalido():
+    X0, Y0, IEN0 = quadrado_dois_triangulos()
+    EToE, _ = montar_EToE(IEN0)
+    node_to_elem = montar_node_to_elem(IEN0, 4)
+    IEN, X, Y = elem_mini(IEN0, X0, Y0)
+
+    try:
+        calculo_sl(X, Y, IEN, EToE, node_to_elem, [None] * 4, {},
+                    np.zeros(6), np.zeros(6), 0.1, 4, 2, fora_dominio="qualquer")
+    except ValueError as e:
+        assert "fora_dominio" in str(e)
+    else:
+        raise AssertionError("deveria ter levantado ValueError")

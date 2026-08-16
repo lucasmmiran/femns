@@ -67,18 +67,28 @@ def test_salvar_resumo_cria_diretorio_pai_se_nao_existir(tmp_path):
 
 
 def test_salvar_resumo_migra_arquivo_com_cabecalho_antigo(tmp_path):
-    """Simula um .xlsx criado com uma versao antiga de COLUNAS (sem uma
-    coluna que so foi acrescentada depois, ex. `element`) -- salvar_resumo
-    deve realinhar o cabecalho pra versao atual em vez de desalinhar as
-    linhas novas do cabecalho antigo salvo no arquivo."""
+    """Simula um .xlsx criado com uma versao antiga de COLUNAS (sem colunas
+    que so foram acrescentadas depois, ex. `element`/`sl_boundary`) --
+    salvar_resumo deve realinhar o cabecalho pra versao atual em vez de
+    desalinhar as linhas novas do cabecalho antigo salvo no arquivo.
+
+    A linha antiga e' escrita a partir de `valores_antigos`, nao por
+    posicao fixa, pra o teste continuar valendo quando outra coluna nova
+    for acrescentada ao meio de COLUNAS.
+    """
     path = tmp_path / "benchmarks.xlsx"
 
-    cabecalho_antigo = [c for c in COLUNAS if c != "element"]
+    novas = {"element", "sl_boundary"}
+    cabecalho_antigo = [c for c in COLUNAS if c not in novas]
+    valores_antigos = {
+        "timestamp": "2026-01-01T00:00:00", "mesh": "meshes/poiseuille.msh",
+        "advection": "explicit", "dt": 0.001, "reynolds": 1, "iterations": 1000,
+    }
     wb = Workbook()
     ws = wb.active
     ws.title = "Resumo"
     ws.append(cabecalho_antigo)
-    ws.append(["2026-01-01T00:00:00", "meshes/poiseuille.msh", "explicit", 0.001, 1, 1000])
+    ws.append([valores_antigos.get(c) for c in cabecalho_antigo])
     wb.save(path)
 
     salvar_resumo(path, {"mesh": "meshes/degrau.msh", "advection": "explicit", "element": "tri6"})

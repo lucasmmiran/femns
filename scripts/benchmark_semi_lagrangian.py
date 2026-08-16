@@ -156,7 +156,7 @@ def main():
         campo["ccName"], campo["conditions"], vx_np, vy_np, dt, npoints, ne)
     vx_star_novo, vy_star_novo = rodar_novo()
 
-    elem_atual, _ = localizar_pontos_partida(
+    elem_atual, _, _ = localizar_pontos_partida(
         X_np - dt * vx_np, Y_np - dt * vy_np,
         np.concatenate([campo["node_to_elem"], np.arange(ne)]),
         X_np, Y_np, campo["IEN"], campo["EToE"])

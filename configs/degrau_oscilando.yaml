@@ -1,0 +1,37 @@
+mesh: meshes/degrau.msh
+output_dir: solucoes/degrau_oscilando
+benchmark_xlsx: solucoes/benchmarks.xlsx
+
+simulation:
+  dt: 0.01
+  iterations: 40
+  reynolds: 1
+  advection: semi_lagrangian  # explicit (Euleriano) ou semi_lagrangian
+
+boundary:
+  # Ordem de prioridade dos contornos, da mais baixa para a mais alta.
+  # Quando um nó pertence a mais de um contorno (ex.: quinas da malha),
+  # vale a condição do último nome desta lista que o contém.
+  priority: [outlet, inlet, top, bottom]
+  conditions:
+    inlet:  {vx: 1.0, vy: 0.0}
+    bottom: {vx: 0.0, vy: 0.0}
+    top:    {vx: 0.0, vy: 0.0}
+    outlet: {p: 0.0} #Velocidade solta para que o códigogere a solução.
+
+# Deslocamento senoidal de um nó da malha (experimento de malha móvel).
+moving_point:
+  enabled: false
+  node_index: 345
+  amplitude_factor: 0.1
+  omega: 31.4159265358979  # 20 passos por periodo com dt=0.01 (pi*200 daria 1 -> malha congelada)
+
+# Oscilacao de TODOS os nos interiores (experimento de malha movel/ALE).
+# Cada no oscila ao longo de uma direcao propria, com fase propria, com
+# amplitude = amplitude_factor * (distancia ao vizinho mais proximo).
+# Com isto ligado o sistema e' remontado a cada passo (a malha muda).
+mesh_motion:
+  enabled: true
+  amplitude_factor: 0.3
+  omega: 31.4159265358979  # 20 passos por periodo com dt=0.01 (pi*200 daria 1 -> malha congelada)
+  seed: 0

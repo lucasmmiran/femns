@@ -106,6 +106,7 @@ simulation:
   iterations: 1000
   reynolds: 1
   advection: explicit  # explicit (padrao) ou semi_lagrangian
+  sl_boundary: intercept  # intercept (padrao) ou dirichlet -- so vale com semi_lagrangian
   element: mini  # mini (padrao) ou tri6 -- semi_lagrangian ainda so suporta mini
 
 boundary:
@@ -135,9 +136,67 @@ benchmark_xlsx: solucoes/benchmarks.xlsx
   (`vx`, `vy`, `p`) que são condição de Dirichlet ali. Um componente
   ausente fica livre (natural) naquele contorno — é assim que o outlet
   fica livre em velocidade e as paredes/entrada ficam livres em pressão.
-- **`moving_point`**: experimento de malha móvel/ALE — desloca o nó
-  `node_index` em trajetória senoidal a cada iteração. Defina
-  `enabled: false` para desativar.
+- **`moving_point`**: experimento de malha móvel/ALE — desloca **um** nó
+  (`node_index`) em órbita circular a cada iteração, reinterpolando a
+  velocidade dele a partir dos vizinhos (IDW). Defina `enabled: false`
+  para desativar.
+- **`mesh_motion`**: experimento de malha móvel/ALE — faz **todos os nós
+  interiores** (os que não estão em nenhum contorno) oscilarem:
+
+  ```yaml
+  mesh_motion:
+    enabled: true
+    amplitude_factor: 0.3   # amplitude = fator × distância ao vizinho mais próximo
+    omega: 31.41593         # ver "amostragem no tempo" abaixo
+    seed: 0                 # fase/direção sorteadas — mesma semente, mesma oscilação
+  ```
+
+  **Amostragem no tempo (armadilha):** o que importa não é `omega` sozinho,
+  e sim **quantos passos cabem num período**, `2π/(ω·dt)`. Com `omega: 628.31853`
+  (π·200, o default do `moving_point`) e `dt: 0.01` dá **exatamente 1** —
+  a malha é amostrada sempre na mesma fase e fica *parada* numa configuração
+  deslocada, sem erro nenhum e parecendo uma malha móvel. O
+  `run_simulation.py` aborta abaixo de 4 passos por período e avisa abaixo
+  de 10. Para `dt: 0.01`, `omega: 31.41593` dá 20 passos por período.
+
+  Cada nó oscila **ao longo de uma reta**, com direção e fase próprias
+  (`pos(t) = pos₀ + A·sin(ωt + φ)·[dirₓ, dir_y]`), então vizinhos não se
+  movem juntos e a malha "treme" — é o caso mais severo para a busca por
+  elemento da advecção semi-Lagrangeana. A amplitude é **local** (por nó),
+  não um `h` global: acompanha o refino da malha.
+
+  Os nós de contorno nunca se movem, e os nós extras do elemento
+  (centroide do MINI, nós de aresta do Tri6) são recalculados dos
+  vértices a cada passo (`mesh.atualiza_nos_extras`) — se não fossem, o
+  centroide sairia de dentro do triângulo.
+
+  **Correção ALE do termo convectivo.** Numa malha que se move, o que
+  transporta é o quanto o fluido anda *em relação à malha*. A correção
+  tem forma diferente em cada caminho de advecção:
+
+  - `advection: explicit` — a velocidade convectiva vira `v − w`, com `w`
+    a velocidade da malha (`moving_mesh.velocidade_malha`, derivada
+    **analítica** da oscilação, não diferença finita). Com `w = 0` recai
+    exatamente no caso Euleriano.
+  - `advection: semi_lagrangian` — a correção é **geométrica**, não um
+    termo a subtrair: o pé da característica é um ponto do espaço físico,
+    então o backtrace parte da posição *nova* do nó, mas o campo que se
+    interpola lá é o do passo anterior, discretizado na malha **velha**.
+    `calculo_sl` recebe as duas geometrias (`X, Y` de chegada e
+    `X_campo, Y_campo` do campo). Sem isso o campo seria avaliado numa
+    geometria que não é a dele — medido no degrau, muda até **15% da
+    escala de velocidade**, em 98% dos nós.
+
+  Com isto ligado o **sistema é remontado a cada passo** (assembly +
+  matriz de bloco + contorno), já que a geometria muda. No degrau isso
+  custou ~22% a mais de tempo (18,4 s vs 15,0 s em 20 iterações). A cada
+  passo é verificado se algum elemento inverteu (`mesh.area_com_sinal`);
+  se inverter, a simulação **aborta** em vez de seguir — `assembly` toma
+  `abs` da área mas não dos coeficientes `bi`/`ci`, então um elemento
+  invertido entraria com `Gx`/`Gy` de sinal trocado, sem erro nenhum.
+  Com `amplitude_factor: 0.3` no degrau não houve inversão, mas a área
+  mínima caiu ~4× — `0.3` não é uma garantia formal, é um valor medido
+  nesta malha.
 - **`simulation.advection`**: `explicit` (padrão) trata a advecção de
   forma explícita, linearizada na velocidade do passo anterior —
   restrita a uma condição de estabilidade tipo CFL no `dt`.
@@ -146,6 +205,20 @@ benchmark_xlsx: solucoes/benchmarks.xlsx
   restrição de `dt`, ao custo de alguma difusão numérica adicional e
   de rodar mais devagar por passo (a busca do elemento ainda não é
   vetorizada — ver `docs/semi_lagrangian_strategy.pdf`).
+- **`simulation.sl_boundary`**: o que fazer quando o pé da característica
+  cai **fora da malha** (só tem efeito com `advection: semi_lagrangian`).
+  `dirichlet` usa o valor de Dirichlet do contorno *do próprio nó
+  de chegada*, e mantém o valor atual do nó se aquele contorno não
+  prescreve aquele componente — o que "congela" a advecção nesse nó.
+  `intercept` (padrão) reproduz o código de referência do professor
+  (`referencia/clSemiLagrangian.py`, `computeIntercept`): calcula onde a
+  característica de fato cruzou o contorno e interpola o campo atual nos
+  dois nós daquela aresta. A interpolação na aresta é linear e isso é
+  **exato**, não aproximação — sobre uma aresta uma coordenada baricêntrica
+  é zero, a correção de bolha do MINI se anula e a base vira P1.
+  Os dois só divergem quando nós **interiores** saem do domínio: com `dt`
+  pequeno saem só nós do próprio contorno de entrada, onde as duas
+  respostas coincidem (ver `docs/relatorio_sl_boundary.md`).
 - **`simulation.element`**: `mini` (padrão) usa o elemento MINI
   (P1 + bolha / P1). `tri6` usa o elemento Tri6 (Taylor-Hood, P2/P1) —
   velocidade quadrática (vértices + nó de aresta), pressão linear só
@@ -223,7 +296,7 @@ lado a lado numa tabela só. Colunas registradas:
 
 | Grupo | Colunas |
 |---|---|
-| Identificação | `timestamp`, `mesh`, `advection`, `element`, `dt`, `reynolds`, `iterations`, `npoints`, `ne`, `device` |
+| Identificação | `timestamp`, `mesh`, `advection`, `sl_boundary`, `element`, `dt`, `reynolds`, `iterations`, `npoints`, `ne`, `device` |
 | Desempenho | `tempo_total_s`, `tempo_assembly_s`, `tempo_medio_por_iter_s` |
 | Convergência do BiCGSTAB | `bicg_iters_media`, `bicg_iters_max`, `bicg_residual_media`, `bicg_residual_max`, `passos_nao_convergidos` |
 | Qualidade física da solução | `vel_l2_media`, `vel_l2_max`, `vel_linf_max`, `divergencia_l2_media`, `divergencia_l2_max`, `pressao_min`, `pressao_max`, `pressao_media` |

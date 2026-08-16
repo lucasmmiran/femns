@@ -11,7 +11,7 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 
 COLUNAS = [
-    "timestamp", "mesh", "advection", "element", "dt", "reynolds", "iterations",
+    "timestamp", "mesh", "advection", "sl_boundary", "element", "dt", "reynolds", "iterations",
     "npoints", "ne", "device",
     "tempo_total_s", "tempo_assembly_s", "tempo_medio_por_iter_s",
     "bicg_iters_media", "bicg_iters_max",
