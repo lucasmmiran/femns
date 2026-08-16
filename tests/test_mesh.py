@@ -1,7 +1,7 @@
 import meshio
 import numpy as np
 
-from femns.mesh import _mesh_from_raw, elem_mini, montar_EToE, montar_node_to_elem, montar_NToN
+from femns.mesh import _mesh_from_raw, elem_mini, elem_tri6, estende_IENbound_tri6, montar_EToE, montar_node_to_elem, montar_NToN
 
 
 def quadrado_dois_triangulos():
@@ -63,6 +63,47 @@ def test_elem_mini_adiciona_centroide():
     assert IEN_new[0, 3] == 3
     assert X_new[3] == np.mean(X)
     assert Y_new[3] == np.mean(Y)
+
+
+def test_elem_tri6_deduplica_no_de_aresta_compartilhada():
+    """Os dois triangulos do quadrado compartilham a aresta (0,2) -- o no
+    de aresta correspondente deve ser o MESMO nos dois elementos, nao um
+    novo no por elemento (diferente do centroide do MINI)."""
+    X, Y, IEN = quadrado_dois_triangulos()
+
+    IEN_new, X_new, Y_new, edge_para_no = elem_tri6(IEN, X, Y)
+
+    assert IEN_new.shape == (2, 6)
+    # elemento 0: v4=aresta(0,1), v5=aresta(1,2), v6=aresta(2,0)
+    # elemento 1: v4=aresta(0,2), v5=aresta(2,3), v6=aresta(3,0)
+    # aresta(2,0) do elemento 0 e aresta(0,2) do elemento 1 sao a mesma aresta.
+    assert IEN_new[0, 5] == IEN_new[1, 3]
+
+    # 4 vertices + 5 arestas distintas (das 6 "pontas" de aresta, 1 par se repete)
+    assert X_new.shape == (9,)
+    assert Y_new.shape == (9,)
+    assert len(edge_para_no) == 5
+
+    no_diagonal = edge_para_no[(0, 2)]
+    assert X_new[no_diagonal] == 0.5
+    assert Y_new[no_diagonal] == 0.5
+    assert IEN_new[0, 5] == no_diagonal
+
+
+def test_estende_IENbound_tri6_insere_no_de_aresta():
+    X, Y, IEN = quadrado_dois_triangulos()
+    _, _, _, edge_para_no = elem_tri6(IEN, X, Y)
+
+    # contorno externo do quadrado (nao inclui a diagonal (0,2), que e interna)
+    IENbound = np.array([[0, 1], [1, 2], [2, 3], [3, 0]])
+    IENbound_novo = estende_IENbound_tri6(IENbound, edge_para_no)
+
+    assert IENbound_novo.shape == (4, 3)
+    for i, (a, b) in enumerate(IENbound):
+        chave = (min(a, b), max(a, b))
+        assert IENbound_novo[i, 0] == a
+        assert IENbound_novo[i, 1] == edge_para_no[chave]
+        assert IENbound_novo[i, 2] == b
 
 
 def test_mesh_from_raw_acha_blocos_por_tipo_independente_da_ordem():

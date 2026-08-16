@@ -11,7 +11,7 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 
 COLUNAS = [
-    "timestamp", "mesh", "advection", "dt", "reynolds", "iterations",
+    "timestamp", "mesh", "advection", "element", "dt", "reynolds", "iterations",
     "npoints", "ne", "device",
     "tempo_total_s", "tempo_assembly_s", "tempo_medio_por_iter_s",
     "bicg_iters_media", "bicg_iters_max",
@@ -21,6 +21,30 @@ COLUNAS = [
     "divergencia_l2_media", "divergencia_l2_max",
     "pressao_min", "pressao_max", "pressao_media",
 ]
+
+
+def _migrar_cabecalho_se_preciso(ws):
+    """Reescreve a planilha com o cabecalho atual (`COLUNAS`) se o arquivo
+    foi criado com uma versao antiga (ex.: uma coluna nova, como `element`,
+    foi acrescentada ao meio de `COLUNAS` depois que o arquivo ja existia).
+
+    Sem isso, linhas novas (escritas na ordem de `COLUNAS` atual) ficam
+    desalinhadas do cabecalho antigo salvo na planilha -- os dados ficam
+    certos na celula, mas o nome da coluna no cabecalho nao bate mais a
+    partir do ponto de insercao. Linhas antigas ganham celula vazia nas
+    colunas que nao existiam quando foram escritas (mesma regra de `dados`
+    ausente em `salvar_resumo`).
+    """
+    cabecalho_salvo = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
+    if cabecalho_salvo == COLUNAS:
+        return
+
+    linhas_antigas = [dict(zip(cabecalho_salvo, [c.value for c in row])) for row in ws.iter_rows(min_row=2)]
+
+    ws.delete_rows(1, ws.max_row)
+    ws.append(COLUNAS)
+    for linha in linhas_antigas:
+        ws.append([linha.get(coluna, "") for coluna in COLUNAS])
 
 
 def salvar_resumo(path: str, dados: dict):
@@ -36,6 +60,7 @@ def salvar_resumo(path: str, dados: dict):
     if caminho.exists():
         wb = load_workbook(caminho)
         ws = wb.active
+        _migrar_cabecalho_se_preciso(ws)
     else:
         caminho.parent.mkdir(parents=True, exist_ok=True)
         wb = Workbook()

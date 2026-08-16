@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI: roda uma simulacao de Navier-Stokes (elemento MINI, Euler implicito) a partir de um config yaml."""
+"""CLI: roda uma simulacao de Navier-Stokes (elemento MINI ou Tri6, Euler implicito) a partir de um config yaml."""
 
 import argparse
 import os
@@ -11,10 +11,10 @@ import torch
 import yaml
 from tqdm import tqdm
 
-from femns.assembly import assemble_mini
+from femns.assembly import assemble_mini, assemble_tri6
 from femns.boundary import apply_boundary_conditions, assign_boundary_names, build_boundary_conditions
 from femns.io import write_vtk
-from femns.mesh import elem_mini, montar_EToE, montar_node_to_elem, montar_NToN, read_mesh
+from femns.mesh import elem_mini, elem_tri6, estende_IENbound_tri6, montar_EToE, montar_node_to_elem, montar_NToN, read_mesh
 from femns.moving_mesh import mover_ponto
 from femns.report import salvar_resumo
 from femns.semi_lagrangian import calculo_sl
@@ -36,6 +36,14 @@ def main():
     Iter = cfg["simulation"]["iterations"]
     Re = cfg["simulation"]["reynolds"]
     advection = cfg["simulation"].get("advection", "explicit")
+    element = cfg["simulation"].get("element", "mini")
+    if element not in ("mini", "tri6"):
+        raise ValueError(f"simulation.element desconhecido: {element!r} (use 'mini' ou 'tri6')")
+    if element == "tri6" and advection == "semi_lagrangian":
+        raise ValueError(
+            "advection=semi_lagrangian ainda nao suporta element=tri6 -- "
+            "femns.semi_lagrangian.interpolate_mini e especifico da interpolacao P1+bolha do MINI."
+        )
     output_dir = cfg["output_dir"]
 
     start = timer()
@@ -49,36 +57,52 @@ def main():
     print(f'Passo de tempo: {dt}')
     print(f'Numero de Reynolds: {Re}')
     print(f'Método escolhido: {advection}')
+    print(f'Elemento: {element}')
     print('\n--------------------------------------------')
 
     mesh = read_mesh(cfg["mesh"]) # Criado um objeto Mesh para a malha utilizada
     npoints, ne = mesh.npoints, mesh.ne
 
+    # Augmenta a malha de vertices (mesh.IEN) com os nos extras do elemento
+    # de velocidade escolhido, e estende IENbound de acordo (so o Tri6 tem
+    # no extra em contorno -- a bolha do MINI e sempre interna ao elemento).
+    if element == "tri6":
+        IEN_np, X_np, Y_np, edge_para_no = elem_tri6(mesh.IEN, mesh.X, mesh.Y)
+        IENbound_bc = estende_IENbound_tri6(mesh.IENbound, edge_para_no)
+        nnodes = X_np.shape[0]
+    else:
+        IEN_np, X_np, Y_np = elem_mini(mesh.IEN, mesh.X, mesh.Y)
+        IENbound_bc = mesh.IENbound
+        nnodes = npoints + ne
+    n_extra = nnodes - npoints  # equivalente a `ne` para boundary/solver (ver docstrings)
+
     print('Leitura de malha completa:')
     print(f'Numero de elementos: {ne}')
     print(f'Numero de pontos: {npoints}')
-    print(f'Numero de nos da simulacao: {npoints + ne}')
+    print(f'Numero de nos da simulacao: {nnodes}')
     print('\n--------------------------------------------\n')
 
     # Condicoes de contorno (nomes por no, depois valores/indices)
-    ccName = assign_boundary_names(mesh.IENbound, mesh.IENboundElem, npoints, cfg["boundary"]["priority"],
-                                    mesh.IENpoint, mesh.IENpointElem) # Roda a função que nomeia os pontos dos contornos com a priorização
+    ccName = assign_boundary_names(IENbound_bc, mesh.IENboundElem, npoints, cfg["boundary"]["priority"],
+                                    mesh.IENpoint, mesh.IENpointElem, nnodes=nnodes) # Roda a função que nomeia os pontos dos contornos com a priorização
     vx_cc, vy_cc, p_cc, vx_cc_pts, vy_cc_pts, p_cc_pts = build_boundary_conditions(
-        mesh.IENbound, ccName, cfg["boundary"]["conditions"], npoints, device, mesh.IENpoint)
+        IENbound_bc, ccName, cfg["boundary"]["conditions"], npoints, device, mesh.IENpoint, nnodes=nnodes)
 
-    # Conectividade de vizinhanca (antes de acrescentar os centroides do elemento MINI)
+    # Conectividade de vizinhanca (malha so de vertices, antes de acrescentar os nos extras)
     NToN = montar_NToN(mesh.IEN, npoints)
 
     if advection == "semi_lagrangian":
         EToE, _ = montar_EToE(mesh.IEN)
         node_to_elem = montar_node_to_elem(mesh.IEN, npoints)
 
-    IEN, X, Y = elem_mini(mesh.IEN, mesh.X, mesh.Y)
-    IEN, X, Y = torch.from_numpy(IEN).to(device), torch.from_numpy(X).to(device), torch.from_numpy(Y).to(device)
+    IEN, X, Y = torch.from_numpy(IEN_np).to(device), torch.from_numpy(X_np).to(device), torch.from_numpy(Y_np).to(device)
 
     print(f"Tempo ate o assembly: {round(timer() - start, 2)}")
 
-    K, M, Gx, Gy, Gvx, Gvy = assemble_mini(X, Y, IEN, ne, npoints)
+    if element == "tri6":
+        K, M, Gx, Gy, Gvx, Gvy = assemble_tri6(X, Y, IEN, npoints, nnodes)
+    else:
+        K, M, Gx, Gy, Gvx, Gvy = assemble_mini(X, Y, IEN, ne, npoints)
     beta = pressure_scale_factor(K, M, Gx, Gy, dt, Re)
     print(f"Fator de escala da pressao (beta): {beta:.4f}")
     A = build_system_matrix(dt, Re, K, M, Gx, Gy, beta)
@@ -86,7 +110,7 @@ def main():
     print(f"Tempo depois do assembly: {round(timer() - start, 2)}")
     t_assembly = timer() - start
 
-    A = apply_boundary_conditions(A, vx_cc_pts, vy_cc_pts, p_cc_pts, npoints, ne)
+    A = apply_boundary_conditions(A, vx_cc_pts, vy_cc_pts, p_cc_pts, npoints, n_extra)
     A = A.to_sparse_csr()
     Gvx = Gvx.to_sparse_csr()
     Gvy = Gvy.to_sparse_csr()
@@ -112,14 +136,14 @@ def main():
         mesh.raw.points,
         mesh.raw.cells,
         point_data={
-            "vx_cc": vx_cc.cpu().numpy(),
-            "vy_cc": vy_cc.cpu().numpy(),
+            "vx_cc": vx_cc[:npoints].cpu().numpy(),
+            "vy_cc": vy_cc[:npoints].cpu().numpy(),
             "p_cc": p_cc.cpu().numpy(),
         },
     )
 
-    vx = torch.zeros(npoints + ne, dtype=torch.float64, device=device)
-    vy = torch.zeros(npoints + ne, dtype=torch.float64, device=device)
+    vx = torch.zeros(nnodes, dtype=torch.float64, device=device)
+    vy = torch.zeros(nnodes, dtype=torch.float64, device=device)
     p = torch.zeros(npoints, dtype=torch.float64, device=device)
 
     vx[vx_cc_pts] = vx_cc[vx_cc_pts]
@@ -156,7 +180,7 @@ def main():
         vx, vy, p, x0, info = time_step(
             A, M, Gvx, Gvy, vx, vy, dt,
             vx_cc, vy_cc, p_cc, vx_cc_pts, vy_cc_pts, p_cc_pts,
-            npoints, ne, beta=beta, x0=x0, vx_star=vx_star, vy_star=vy_star,
+            npoints, n_extra, beta=beta, x0=x0, vx_star=vx_star, vy_star=vy_star,
         )
         pbar.set_postfix(bicg_iters=info["iters"], residual=f'{info["residual"]:.1e}')
 
@@ -196,7 +220,7 @@ def main():
         tempo_total = timer() - start
         dados = dict(
             timestamp=datetime.now().isoformat(timespec="seconds"),
-            mesh=cfg["mesh"], advection=advection, dt=dt, reynolds=Re, iterations=Iter,
+            mesh=cfg["mesh"], advection=advection, element=element, dt=dt, reynolds=Re, iterations=Iter,
             npoints=npoints, ne=ne, device=str(device),
             tempo_total_s=round(tempo_total, 3),
             tempo_assembly_s=round(t_assembly, 3),

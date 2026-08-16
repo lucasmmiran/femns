@@ -1,4 +1,4 @@
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
 from femns.report import COLUNAS, salvar_resumo
 
@@ -64,3 +64,36 @@ def test_salvar_resumo_cria_diretorio_pai_se_nao_existir(tmp_path):
     salvar_resumo(path, {"mesh": "a"})
 
     assert path.exists()
+
+
+def test_salvar_resumo_migra_arquivo_com_cabecalho_antigo(tmp_path):
+    """Simula um .xlsx criado com uma versao antiga de COLUNAS (sem uma
+    coluna que so foi acrescentada depois, ex. `element`) -- salvar_resumo
+    deve realinhar o cabecalho pra versao atual em vez de desalinhar as
+    linhas novas do cabecalho antigo salvo no arquivo."""
+    path = tmp_path / "benchmarks.xlsx"
+
+    cabecalho_antigo = [c for c in COLUNAS if c != "element"]
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Resumo"
+    ws.append(cabecalho_antigo)
+    ws.append(["2026-01-01T00:00:00", "meshes/poiseuille.msh", "explicit", 0.001, 1, 1000])
+    wb.save(path)
+
+    salvar_resumo(path, {"mesh": "meshes/degrau.msh", "advection": "explicit", "element": "tri6"})
+
+    wb2 = load_workbook(path)
+    ws2 = wb2.active
+    linhas = list(ws2.iter_rows(values_only=True))
+
+    assert linhas[0] == tuple(COLUNAS)  # cabecalho realinhado
+
+    linha_antiga = dict(zip(COLUNAS, linhas[1]))
+    assert linha_antiga["mesh"] == "meshes/poiseuille.msh"
+    assert linha_antiga["dt"] == 0.001
+    assert linha_antiga["element"] is None  # nao existia quando essa linha foi escrita
+
+    linha_nova = dict(zip(COLUNAS, linhas[2]))
+    assert linha_nova["mesh"] == "meshes/degrau.msh"
+    assert linha_nova["element"] == "tri6"

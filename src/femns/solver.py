@@ -38,6 +38,15 @@ def build_system_matrix(dt: float, Re: float, K: torch.Tensor, M: torch.Tensor,
     onde Dx = -Gx^T e Dy = -Gy^T (restricao de incompressibilidade), e
     `beta` e o fator de `pressure_scale_factor` (1.0 = sem escala). A
     pressao fisica e p = beta * p_tilde.
+
+    Os dois assemblers (`assemble_mini`, `assemble_tri6`) montam Gx/Gy na
+    mesma forma fraca, `INT(phi_j dN_i/dx)`, entao o bloco de continuidade
+    sai como -Gx^T nos dois casos e o sistema de sela fica simetrico
+    (C = B^T). Essa simetria nao e cosmetica: alimentar aqui um Gx montado
+    na outra forma fraca (derivada na pressao, `INT(N_i dphi_j/dx)`, que
+    difere desta por integracao por partes -- logo por sinal) quebra a
+    relacao adjunta e o BiCGSTAB deixa de convergir (ver CLAUDE.local.md,
+    2026-08-15).
     """
     n = K.shape[0]  # npoints + ne
     m = Gx.shape[1]  # npoints

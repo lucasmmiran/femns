@@ -3,9 +3,12 @@
 Solver de elementos finitos (método de Galerkin) para as equações de
 Navier-Stokes incompressíveis, com montagem vetorizada em GPU (PyTorch).
 
-Discretização espacial pelo elemento MINI (P1 + bolha para velocidade,
-P1 para pressão) em malhas triangulares, com avanço temporal por Euler
-implícito e termo advectivo linearizado na velocidade do passo anterior.
+Discretização espacial em malhas triangulares, com avanço temporal por
+Euler implícito e termo advectivo linearizado na velocidade do passo
+anterior. Dois elementos disponíveis (`simulation.element` no config,
+ver seção "Config" abaixo): **MINI** (padrão, P1 + bolha para
+velocidade, P1 para pressão) e **Tri6** (Taylor-Hood, P2 para
+velocidade — vértices + nó de aresta —, P1 para pressão).
 
 ## Estrutura do projeto
 
@@ -16,15 +19,17 @@ implícito e termo advectivo linearizado na velocidade do passo anterior.
 ├── meshes/
 │   └── poiseuille.geo/.msh # malha gerada no Gmsh (.geo é a fonte, .msh o resultado)
 ├── src/femns/               # pacote com a física/numérica do solver
-│   ├── mesh.py              # leitura da malha, conectividade (NToN/EToE), elemento MINI
+│   ├── mesh.py              # leitura da malha, conectividade (NToN/EToE), elementos MINI e Tri6
 │   ├── assembly.py          # montagem vetorizada das matrizes de elemento (K, M, Gx, Gy, Gvx, Gvy)
 │   ├── boundary.py          # condições de contorno: nomes por nó, valores, aplicação na matriz
 │   ├── moving_mesh.py        # deslocamento senoidal de um nó (experimento de malha móvel)
 │   ├── solver.py             # montagem do sistema global e passo de tempo (Euler implícito)
-│   └── io.py                 # escrita dos resultados em VTK
+│   ├── io.py                 # escrita dos resultados em VTK
+│   └── plotting.py           # imagens (PNG) da distribuição espacial das variáveis
 ├── scripts/
-│   └── run_simulation.py    # CLI: orquestra mesh → assembly → boundary → solver → io
-├── tests/                    # testes unitários (conectividade, valores analíticos do elemento MINI, contornos)
+│   ├── run_simulation.py    # CLI: orquestra mesh → assembly → boundary → solver → io
+│   └── plot_solution.py     # CLI: gera as imagens da última solução de uma simulação
+├── tests/                    # testes unitários (conectividade, valores analíticos dos elementos MINI/Tri6, contornos)
 ├── solucoes/                  # saída dos .vtk (gerada em runtime, ignorada pelo git)
 └── pyproject.toml
 ```
@@ -41,12 +46,13 @@ nós sem precisar de uma malha `.msh` nem rodar a simulação inteira.
 
 | Módulo | O que faz | O que NÃO faz |
 |---|---|---|
-| `mesh.py` | lê `.msh`, monta elemento MINI (nó de centroide), conectividade nó-a-nó (`NToN`) e elemento-a-elemento (`EToE`) | não sabe de condição de contorno nem de matrizes de rigidez |
+| `mesh.py` | lê `.msh`, monta elemento MINI (nó de centroide) ou Tri6 (nós de aresta, deduplicados entre elementos vizinhos), conectividade nó-a-nó (`NToN`) e elemento-a-elemento (`EToE`) | não sabe de condição de contorno nem de matrizes de rigidez |
 | `assembly.py` | monta `K, M, Gx, Gy, Gvx, Gvy` (rigidez, massa, gradiente) por elemento, vetorizado em `torch` | não monta o sistema global nem aplica contorno |
 | `boundary.py` | resolve qual nome de contorno cada nó tem (por prioridade) e monta os índices/valores de Dirichlet; zera linhas da matriz global e põe 1 na diagonal | não decide *quais* são os valores físicos — isso vem do config |
 | `moving_mesh.py` | desloca um nó da malha em trajetória senoidal e reinterpola sua velocidade a partir dos vizinhos (IDW) | não atualiza a malha inteira, só o nó indicado |
 | `solver.py` | monta a matriz de bloco global (vx, vy, p) e resolve um passo de tempo | não conhece a malha nem faz I/O |
 | `io.py` | escreve pontos/células/campos em `.vtk` via `meshio` | não decide nomes de arquivo/diretório de saída (isso é do script) |
+| `plotting.py` | plota `vx`, `vy`, `p` e `\|v\|` sobre a malha triangular (`matplotlib`) e salva em PNG | não sabe achar o `.vtk` da última iteração nem ler o config (isso é do script) |
 
 ## Instalação
 
@@ -59,9 +65,9 @@ pip install -e ".[test]"
 ```
 
 Isso instala o pacote `femns` em modo editável, mais as dependências de
-runtime (`torch`, `meshio`, `numpy`, `scipy`, `tqdm`, `pyyaml`) e de teste
-(`pytest`). Se houver GPU CUDA disponível, o `torch` a detecta e usa
-automaticamente; caso contrário, roda em CPU.
+runtime (`torch`, `meshio`, `numpy`, `scipy`, `tqdm`, `pyyaml`,
+`matplotlib`) e de teste (`pytest`). Se houver GPU CUDA disponível, o
+`torch` a detecta e usa automaticamente; caso contrário, roda em CPU.
 
 ## Como rodar uma simulação
 
@@ -75,6 +81,20 @@ iterações configurado e escreve um `.vtk` por iteração em `output_dir`
 (`solucoes/` por padrão), além de um `CondicaoDeContorno.vtk` inicial
 com os valores de contorno aplicados.
 
+### Imagens da última solução
+
+```bash
+python scripts/plot_solution.py --config configs/poiseuille.yaml
+```
+
+Acha o `.vtk` de maior número de iteração em `output_dir` (o último passo
+de tempo escrito) e gera um PNG por variável (`vx`, `vy`, `p`) mais a
+magnitude da velocidade `|v|`, em `output_dir/imagens/`. Também aceita um
+`.vtk` específico (`--vtk caminho.vtk`) e um diretório de saída
+alternativo (`--output-dir`) — ver `femns.plotting.plot_solucao` se
+quiser plotar a partir de `points`/`cells`/`point_data` direto (sem
+passar por um arquivo).
+
 ### Config (`configs/*.yaml`)
 
 ```yaml
@@ -86,6 +106,7 @@ simulation:
   iterations: 1000
   reynolds: 1
   advection: explicit  # explicit (padrao) ou semi_lagrangian
+  element: mini  # mini (padrao) ou tri6 -- semi_lagrangian ainda so suporta mini
 
 boundary:
   priority: [outlet, inlet, top, bottom]   # do menor para o maior prioridade
@@ -125,6 +146,17 @@ benchmark_xlsx: solucoes/benchmarks.xlsx
   restrição de `dt`, ao custo de alguma difusão numérica adicional e
   de rodar mais devagar por passo (a busca do elemento ainda não é
   vetorizada — ver `docs/semi_lagrangian_strategy.pdf`).
+- **`simulation.element`**: `mini` (padrão) usa o elemento MINI
+  (P1 + bolha / P1). `tri6` usa o elemento Tri6 (Taylor-Hood, P2/P1) —
+  velocidade quadrática (vértices + nó de aresta), pressão linear só
+  nos vértices. Os dois montam `Gx`/`Gy` na mesma forma fraca
+  (`∫ φⱼ ∂Nᵢ/∂x`), então o sistema de sela fica simétrico (`C = Bᵀ`)
+  nos dois casos — o Tri6 não é caso especial no solver. A referência
+  em `referencia/ref tri6/` também define uma variante "slip" do
+  gradiente que **não** é usada aqui: ela quebra essa simetria e faz o
+  BiCGSTAB divergir (ver `femns.assembly.assemble_tri6`). Ainda não
+  combina com `advection: semi_lagrangian` (a interpolação de
+  `femns.semi_lagrangian` é específica do MINI).
 
 Para testar rápido, copie o config e reduza `iterations` (ex.: 5) antes
 de apontar `--config` para a cópia — os `.vtk` de uma malha grande levam
@@ -136,8 +168,9 @@ alguns segundos por iteração no solve denso atual (ver limitação abaixo).
 python -m pytest tests/ -v
 ```
 
-Os testes cobrem conectividade de malha (`NToN`/`EToE`), montagem do
-elemento MINI contra valores analíticos calculados à mão para um
+Os testes cobrem conectividade de malha (`NToN`/`EToE`), montagem dos
+elementos MINI e Tri6 contra valores analíticos (calculados à mão e/ou
+verificados por integração simbólica exata com `sympy`) para um
 triângulo de referência, e resolução de prioridade/condições de
 contorno — nenhum depende de arquivo `.msh` nem de GPU.
 
@@ -190,14 +223,14 @@ lado a lado numa tabela só. Colunas registradas:
 
 | Grupo | Colunas |
 |---|---|
-| Identificação | `timestamp`, `mesh`, `advection`, `dt`, `reynolds`, `iterations`, `npoints`, `ne`, `device` |
+| Identificação | `timestamp`, `mesh`, `advection`, `element`, `dt`, `reynolds`, `iterations`, `npoints`, `ne`, `device` |
 | Desempenho | `tempo_total_s`, `tempo_assembly_s`, `tempo_medio_por_iter_s` |
 | Convergência do BiCGSTAB | `bicg_iters_media`, `bicg_iters_max`, `bicg_residual_media`, `bicg_residual_max`, `passos_nao_convergidos` |
 | Qualidade física da solução | `vel_l2_media`, `vel_l2_max`, `vel_linf_max`, `divergencia_l2_media`, `divergencia_l2_max`, `pressao_min`, `pressao_max`, `pressao_media` |
 
 `divergencia_l2_*` mede `Dx@vx + Dy@vy` (`Dx = -Gx^T`, `Dy = -Gy^T`, sem o
 fator `beta` — que é só escala numérica do solver, não faz parte da
-restrição física de incompressibilidade) a cada passo: deveria ficar
+restrição física de incompressibilidade) a cada passo. Deveria ficar
 próximo de zero; um valor crescendo ao longo dos passos é sinal de
 instabilidade numérica antes mesmo da velocidade "explodir" visivelmente.
 Sem `benchmark_xlsx` no config, nada disso é calculado — o custo extra
@@ -206,8 +239,12 @@ pedido.
 
 ## Limitações conhecidas / próximos passos
 
-- Sem suporte a outras geometrias além de malhas triangulares com o
-  elemento MINI (sem P2, sem elementos quadrilaterais).
+- Sem suporte a outras geometrias além de malhas triangulares (MINI ou
+  Tri6; sem elementos quadrilaterais).
+- Tri6 ainda não tem gerador de malha para as demais combinações
+  experimentais (`moving_point` não foi testado com Tri6; `advection:
+  semi_lagrangian` não é suportado com `element: tri6`, ver seção
+  "Config").
 - `moving_mesh.py` move um único nó como experimento pontual; não é um
   esquema de malha móvel/ALE completo (não remonta a malha a partir do
   deslocamento).

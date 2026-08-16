@@ -106,17 +106,34 @@ def assemble_mini(X: torch.Tensor, Y: torch.Tensor, IEN: torch.Tensor, ne: int, 
 
     return K, M, Gx, Gy, Gvx, Gvy
 
-def assemble_tri6(X: torch.Tensor, Y: torch.Tensor, IEN: torch.Tensor, ne: int, npoints: int):
-    """Monta as matrizes esparsas COO do elemento Tri6.
+def assemble_tri6(X: torch.Tensor, Y: torch.Tensor, IEN: torch.Tensor, npoints: int, nnodes: int):
+    """Monta as matrizes esparsas COO do elemento Tri6 (velocidade P2, pressao P1).
 
     Parametros:
-    - X, Y: coordenadas dos nos (inclui centroides do elemento MINI).
-    - IEN: conectividade dos elementos (6 nos: 3 vertices + 3 faces).
-    - ne: numero de elementos.
-    - npoints: numero de nos "reais" (sem contar os centroides).
+    - X, Y: coordenadas dos nos (vertices seguidos dos nos de aresta).
+    - IEN: conectividade dos elementos (6 nos: 3 vertices (v1,v2,v3) + 3 nos de
+      aresta (v4,v5,v6), na convencao v4=aresta(v1,v2), v5=aresta(v2,v3),
+      v6=aresta(v3,v1) -- Zienkiewicz vol. 1, cap. 8).
+    - npoints: numero de nos de vertice (graus de liberdade de pressao, P1).
+    - nnodes: numero total de nos do Tri6 (vertices + arestas, graus de
+      liberdade de velocidade, P2).
 
     Retorno:
-    - K, M, Gx, Gy, Gvx, Gvy: matrizes esparsas COO no mesmo device de X/Y.
+    - K, M, Gx, Gy, Gvx, Gvy: matrizes esparsas COO no mesmo device de X/Y,
+      mesma assinatura de `assemble_mini`.
+
+    Gx/Gy sao o gradiente P2 COMPLETO, `INT(phi_j dN_i/dx)` (`gxele`/`gyele`
+    na referencia) -- mesma forma fraca do MINI, entao o operador de
+    divergencia sai como -Gx^T em `solver.build_system_matrix` e o sistema de
+    sela fica simetrico (C = B^T).
+
+    A referencia tambem define uma variante "slip" (`gxslipele`, so as linhas
+    dos nos de aresta) que NAO e usada aqui: como ela e zero nas linhas de
+    vertice, os graus de liberdade de velocidade dos vertices ficam sem
+    acoplamento com a pressao no bloco de momento, apesar de aparecerem na
+    equacao de continuidade -- isso quebra a relacao adjunta C = B^T e, na
+    pratica, ou inverte o sinal da pressao ou faz o BiCGSTAB divergir
+    (medido em 2026-08-15, ver CLAUDE.local.md).
     """
     device = X.device
 
@@ -180,23 +197,24 @@ def assemble_tri6(X: torch.Tensor, Y: torch.Tensor, IEN: torch.Tensor, ne: int, 
                                                          m_area * 4 * (2 * ci * cj + ci * ck + cj * ck + ck * ck),
                                                          m_area * 8 * (ci * ci + ci * ck + ck * ck)], dim=1)
 
+    # Gradiente P2 completo, INT(phi_j dN_i/dx) (`gxele`/`gyele` da referencia).
+    zb, zc = torch.zeros_like(bi), torch.zeros_like(ci)
     gx_elem_values = torch.stack([
-        (1.0 / 6.0) * bi         ,          torch.zeros_like(bi), torch.zeros_like(bi),
-        torch.zeros_like(bi)     ,              (1.0 / 6.0) * bj, torch.zeros_like(bi),
-        torch.zeros_like(bi)     ,          torch.zeros_like(bi), (1.0 / 6.0) * bk,
-        (1.0 / 6.0) * (bi + 2 * bj), (1.0 / 6.0) * (2 * bi + bj), (1.0 / 6.0) *bi + bj,
-        (1.0 / 6.0) * (bj + bk)    , (1.0 / 6.0) * (bj + 2 * bk), (1.0 / 6.0) * 2*bj + bk,
-        (1.0 / 6.0) * (bi + 2 * bk), (1.0 / 6.0) * (bi + bk)    , (1.0 / 6.0) * 2*bi + bk], dim=1)
-    
+        (1.0 / 6.0) * bi,             zb,                           zb,
+        zb,                           (1.0 / 6.0) * bj,             zb,
+        zb,                           zb,                           (1.0 / 6.0) * bk,
+        (1.0 / 6.0) * (bi + 2 * bj),  (1.0 / 6.0) * (2 * bi + bj),  (1.0 / 6.0) * (bi + bj),
+        (1.0 / 6.0) * (bj + bk),      (1.0 / 6.0) * (bj + 2 * bk),  (1.0 / 6.0) * (2 * bj + bk),
+        (1.0 / 6.0) * (bi + 2 * bk),  (1.0 / 6.0) * (bi + bk),      (1.0 / 6.0) * (2 * bi + bk)], dim=1)
 
     gy_elem_values = torch.stack([
-        (1.0 / 6.0) * ci         ,          torch.zeros_like(ci), torch.zeros_like(ci),
-        torch.zeros_like(ci)     ,              (1.0 / 6.0) * cj, torch.zeros_like(ci),
-        torch.zeros_like(ci)     ,          torch.zeros_like(ci), (1.0 / 6.0) * ck,
-        (1.0 / 6.0) * (ci + 2 * cj), (1.0 / 6.0) * (2 * ci + cj), (1.0 / 6.0) *ci + cj,
-        (1.0 / 6.0) * (cj + ck)    , (1.0 / 6.0) * (cj + 2 * ck), (1.0 / 6.0) * 2*cj + ck,
-        (1.0 / 6.0) * (ci + 2 * ck), (1.0 / 6.0) * (ci + ck)    , (1.0 / 6.0) * 2*ci + ck], dim=1)
-    
+        (1.0 / 6.0) * ci,             zc,                           zc,
+        zc,                           (1.0 / 6.0) * cj,             zc,
+        zc,                           zc,                           (1.0 / 6.0) * ck,
+        (1.0 / 6.0) * (ci + 2 * cj),  (1.0 / 6.0) * (2 * ci + cj),  (1.0 / 6.0) * (ci + cj),
+        (1.0 / 6.0) * (cj + ck),      (1.0 / 6.0) * (cj + 2 * ck),  (1.0 / 6.0) * (2 * cj + ck),
+        (1.0 / 6.0) * (ci + 2 * ck),  (1.0 / 6.0) * (ci + ck),      (1.0 / 6.0) * (2 * ci + ck)], dim=1)
+
     gvx_elem_values = torch.stack([
         (1.0/30.0) * 2 * bi, (1.0/30.0) * -bj, (1.0/30.0) * -bk, (1.0/30.0) * (-bi + 2 * bj), (1.0/30.0) * -(bj + bk), (1.0/30.0) * (-bi + 2 * bk),
         (1.0/30.0) * -bi, (1.0/30.0) * 2 * bj, (1.0/30.0) * -bk, (1.0/30.0) * (2 * bi - bj), (1.0/30.0) * (-bj + 2 * bk), (1.0/30.0) * -(bi + bk),
@@ -217,24 +235,22 @@ def assemble_tri6(X: torch.Tensor, Y: torch.Tensor, IEN: torch.Tensor, ne: int, 
 
     K_values = (kx_elem_values + ky_elem_values).flatten()
 
-    # 6x6 (36 entradas por elemento)
-    row_idx_4 = IEN[:, :4].repeat_interleave(4, dim=1)
-    col_idx_4 = IEN[:, :4].repeat(1, 4)
-    indices_4x4 = torch.stack([row_idx_4, col_idx_4], dim=0).reshape(2, -1)
+    # 6x6 (36 entradas por elemento): K, M, Gvx, Gvy
+    row_idx_6x6 = IEN[:, :6].repeat_interleave(6, dim=1)
+    col_idx_6x6 = IEN[:, :6].repeat(1, 6)
+    indices_6x6 = torch.stack([row_idx_6x6, col_idx_6x6], dim=0).reshape(2, -1)
 
-    # 4x3 (12 entradas por elemento)
-    row_idx_3 = IEN[:, :4].repeat_interleave(3, dim=1)
-    col_idx_3 = IEN[:, :3].repeat(1, 4)
-    indices_4x3 = torch.stack([row_idx_3, col_idx_3], dim=0).reshape(2, -1)
+    # 6x3 (18 entradas por elemento): Gx, Gy (linhas = 6 nos de velocidade, colunas = 3 vertices de pressao)
+    row_idx_6x3 = IEN[:, :6].repeat_interleave(3, dim=1)
+    col_idx_6x3 = IEN[:, :3].repeat(1, 6)
+    indices_6x3 = torch.stack([row_idx_6x3, col_idx_6x3], dim=0).reshape(2, -1)
 
-    K = torch.sparse_coo_tensor(indices_4x4, K_values, size=(npoints + ne, npoints + ne), dtype=torch.float64).to(device)
-    M = torch.sparse_coo_tensor(indices_4x4, m_elem_values.flatten(), size=(npoints + ne, npoints + ne), dtype=torch.float64).to(device)
-    Gx = torch.sparse_coo_tensor(indices_4x3, gx_elem_values.flatten(), size=(npoints + ne, npoints), dtype=torch.float64).to(device)
-    Gy = torch.sparse_coo_tensor(indices_4x3, gy_elem_values.flatten(), size=(npoints + ne, npoints), dtype=torch.float64).to(device)
-    Gvx = torch.sparse_coo_tensor(indices_4x4, gvx_elem_values.flatten(), size=(npoints + ne, npoints + ne), dtype=torch.float64).to(device)
-    Gvy = torch.sparse_coo_tensor(indices_4x4, gvy_elem_values.flatten(), size=(npoints + ne, npoints + ne), dtype=torch.float64).to(device)
-    Dx 
-    Dy
+    K = torch.sparse_coo_tensor(indices_6x6, K_values, size=(nnodes, nnodes), dtype=torch.float64).to(device)
+    M = torch.sparse_coo_tensor(indices_6x6, m_elem_values.flatten(), size=(nnodes, nnodes), dtype=torch.float64).to(device)
+    Gx = torch.sparse_coo_tensor(indices_6x3, gx_elem_values.flatten(), size=(nnodes, npoints), dtype=torch.float64).to(device)
+    Gy = torch.sparse_coo_tensor(indices_6x3, gy_elem_values.flatten(), size=(nnodes, npoints), dtype=torch.float64).to(device)
+    Gvx = torch.sparse_coo_tensor(indices_6x6, gvx_elem_values.flatten(), size=(nnodes, nnodes), dtype=torch.float64).to(device)
+    Gvy = torch.sparse_coo_tensor(indices_6x6, gvy_elem_values.flatten(), size=(nnodes, nnodes), dtype=torch.float64).to(device)
 
-    return K, M, Gx, Gy, Gvx, Gvy, Dx, Dy
+    return K, M, Gx, Gy, Gvx, Gvy
 

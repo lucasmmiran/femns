@@ -113,6 +113,71 @@ def elem_mini(IEN: np.ndarray, X: np.ndarray, Y: np.ndarray):
     return IEN_new, X_new, Y_new
 
 
+def elem_tri6(IEN: np.ndarray, X: np.ndarray, Y: np.ndarray):
+    """Adiciona os nos de aresta (ponto medio) de cada elemento, gerando a
+    conectividade do elemento Tri6 (velocidade P2, pressao P1 -- Taylor-Hood).
+
+    Convencao de nos de aresta (Zienkiewicz vol. 1, cap. 8): v4 = aresta
+    (v1,v2), v5 = aresta (v2,v3), v6 = aresta (v3,v1). Arestas compartilhadas
+    entre elementos vizinhos reaproveitam o mesmo no -- nao duplicam, ao
+    contrario do centroide do MINI (que e proprio de cada elemento).
+
+    Retorna a IEN com 3 colunas extras (nos de aresta), X, Y com as
+    coordenadas dos pontos medios ao final, e `edge_para_no`: dict
+    (no_a, no_b) -> indice do no de aresta (chave ordenada, no_a<no_b) --
+    usado para estender `IENbound` com o no de aresta de cada segmento de
+    contorno (ver `estende_IENbound_tri6`).
+    """
+    npoints = len(X)
+    ne = IEN.shape[0]
+
+    IEN_new = np.hstack((IEN, np.zeros((ne, 3), dtype=IEN.dtype)))
+
+    arestas_locais = [(0, 1), (1, 2), (2, 0)]  # v4, v5, v6
+    edge_para_no = {}
+    xs, ys = [], []
+    proximo_no = npoints
+
+    for e, elem in enumerate(IEN):
+        for f, (a, b) in enumerate(arestas_locais):
+            va, vb = int(elem[a]), int(elem[b])
+            chave = (va, vb) if va < vb else (vb, va)
+            no = edge_para_no.get(chave)
+            if no is None:
+                no = proximo_no
+                edge_para_no[chave] = no
+                xs.append((X[va] + X[vb]) / 2.0)
+                ys.append((Y[va] + Y[vb]) / 2.0)
+                proximo_no += 1
+            IEN_new[e, 3 + f] = no
+
+    X_new = np.concatenate([X, np.array(xs, dtype=X.dtype)])
+    Y_new = np.concatenate([Y, np.array(ys, dtype=Y.dtype)])
+
+    return IEN_new, X_new, Y_new, edge_para_no
+
+
+def estende_IENbound_tri6(IENbound: np.ndarray, edge_para_no: dict) -> np.ndarray:
+    """Insere o no de aresta (ponto medio) entre os dois vertices de cada
+    segmento de contorno, para a condicao de contorno tambem valer sobre o
+    grau de liberdade de velocidade do meio da aresta (Tri6).
+
+    `edge_para_no` vem de `elem_tri6` -- todo segmento de `IENbound` e
+    tambem uma aresta de algum triangulo do dominio, entao ja tem entrada
+    no dict.
+
+    Retorna um array (n_segmentos, 3): [v1, no_aresta, v2].
+    """
+    novo = np.empty((IENbound.shape[0], 3), dtype=IENbound.dtype)
+    for i, (a, b) in enumerate(IENbound):
+        va, vb = int(a), int(b)
+        chave = (va, vb) if va < vb else (vb, va)
+        novo[i, 0] = a
+        novo[i, 1] = edge_para_no[chave]
+        novo[i, 2] = b
+    return novo
+
+
 def montar_EToE(IEN: np.ndarray):
     """Monta a matriz de elementos vizinhos por face.
 

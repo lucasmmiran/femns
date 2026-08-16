@@ -15,6 +15,7 @@ dependencies = [
     "tqdm",
     "pyyaml",
     "openpyxl",
+    "matplotlib",
 ]
 
 [project.optional-dependencies]
