@@ -64,40 +64,87 @@ def perfil_parabolico(coord: np.ndarray, vmax: float,
     return 4.0 * vmax * (coord - s0) * (s1 - coord) / (s1 - s0) ** 2
 
 
+_FUNCOES_PERMITIDAS = {
+    "sin": np.sin, "cos": np.cos, "tan": np.tan,
+    "asin": np.arcsin, "acos": np.arccos, "atan": np.arctan,
+    "sinh": np.sinh, "cosh": np.cosh, "tanh": np.tanh,
+    "exp": np.exp, "log": np.log, "log10": np.log10, "sqrt": np.sqrt,
+    "abs": np.abs, "sign": np.sign, "floor": np.floor, "ceil": np.ceil,
+    "minimum": np.minimum, "maximum": np.maximum, "clip": np.clip,
+    "pi": np.pi, "e": np.e,
+}
+
+
+def funcao_de_y(expressao: str, y: np.ndarray) -> np.ndarray:
+    """Avalia uma expressao Python de `y` (ex.: "4*y*(1-y)") nas coordenadas dadas.
+
+    `y` e' a coordenada **absoluta** do no na malha (nao normalizada pelo
+    contorno) -- a expressao precisa ser escrita pensando no y real do
+    canal, do mesmo jeito que aparece no preview da malha.
+
+    E' um `eval` restrito (builtins bloqueados, so os nomes de
+    `_FUNCOES_PERMITIDAS` mais `y` no escopo), nao um parser matematico
+    de verdade nem uma fronteira de seguranca -- a expressao so e'
+    digitada pelo proprio usuario local, nunca por terceiro. A restricao
+    existe so pra transformar erro de digitacao em `ValueError` claro em
+    vez de deixar passar um nome indefinido.
+    """
+    ambiente = dict(_FUNCOES_PERMITIDAS)
+    ambiente["y"] = y
+    try:
+        resultado = eval(expressao, {"__builtins__": {}}, ambiente)  # noqa: S307
+    except Exception as exc:
+        raise ValueError(f"expressao de contorno invalida {expressao!r}: {exc}") from exc
+    return np.broadcast_to(np.asarray(resultado, dtype=float), y.shape).copy()
+
+
 def valores_da_condicao(valor, idx: np.ndarray, X: np.ndarray, Y: np.ndarray,
                          idx_span: np.ndarray = None):
     """Resolve o valor de uma condicao de contorno nos nos `idx`.
 
     Aceita um numero (condicao uniforme, o caso historico) ou um dict
-    descrevendo um perfil, hoje so `{"perfil": "parabolico", "vmax": v}`.
+    descrevendo a condicao de outra forma:
+      - `{"perfil": "parabolico", "vmax": v}` -- perfil parabolico
+        normalizado pela extensao geometrica do contorno (ver abaixo).
+      - `{"funcao": "4*y*(1-y)"}` -- expressao Python arbitraria do `y`
+        **absoluto** de cada no (ver `funcao_de_y`); ao contrario do
+        perfil parabolico, nao ha normalizacao pela extensao do contorno
+        -- a expressao precisa valer para o y real da malha.
 
     `idx_span` (default: `idx`) sao os nos que definem a **extensao**
     do contorno, e nao precisam ser os mesmos que recebem o valor. A
-    distincao importa: `idx` ja passou pela resolucao de prioridade
-    (`assign_boundary_names`), entao as quinas do contorno normalmente
-    pertencem a parede e **saem** de `idx`. Calcular a extensao so com
-    `idx` encolhe o perfil de `h` em cada ponta -- a parabola zera dentro
-    do canal em vez de na parede, e a vazao sai baixa por ~2h/H (medido:
-    6,4% de erro numa malha com h~0.03, com a vazao ainda conservada de
-    secao a secao, o que faz o erro parecer discretizacao). Passe aqui os
-    nos *geometricos* do contorno.
+    distincao importa pro perfil parabolico: `idx` ja passou pela
+    resolucao de prioridade (`assign_boundary_names`), entao as quinas do
+    contorno normalmente pertencem a parede e **saem** de `idx`. Calcular
+    a extensao so com `idx` encolhe o perfil de `h` em cada ponta -- a
+    parabola zera dentro do canal em vez de na parede, e a vazao sai
+    baixa por ~2h/H (medido: 6,4% de erro numa malha com h~0.03, com a
+    vazao ainda conservada de secao a secao, o que faz o erro parecer
+    discretizacao). Passe aqui os nos *geometricos* do contorno. `funcao`
+    nao usa `idx_span` -- cada no recebe o valor no seu proprio y, sem
+    depender da extensao do contorno.
 
-    O eixo do perfil e' detectado pela geometria do proprio contorno: usa
-    a coordenada em que os nos daquele contorno mais se espalham (y para
-    uma entrada vertical, x para uma horizontal). Evita ter que declarar o
-    eixo no config e errar silenciosamente.
+    O eixo do perfil parabolico e' detectado pela geometria do proprio
+    contorno: usa a coordenada em que os nos daquele contorno mais se
+    espalham (y para uma entrada vertical, x para uma horizontal). Evita
+    ter que declarar o eixo no config e errar silenciosamente.
     """
     if not isinstance(valor, dict):
         return float(valor)
 
     if X is None or Y is None:
         raise ValueError(
-            "condicao de contorno com perfil exige as coordenadas da malha -- "
+            "condicao de contorno com perfil/funcao exige as coordenadas da malha -- "
             "passe X e Y para build_boundary_conditions")
+
+    if "funcao" in valor:
+        return funcao_de_y(valor["funcao"], Y[idx])
 
     nome = valor.get("perfil")
     if nome != "parabolico":
-        raise ValueError(f"perfil de contorno desconhecido: {nome!r} (use 'parabolico')")
+        raise ValueError(
+            f"condicao de contorno desconhecida: {valor!r} -- use um numero, "
+            "{'perfil': 'parabolico', 'vmax': ...} ou {'funcao': '4*y*(1-y)'}")
 
     idx_span = idx if idx_span is None else idx_span
     xs, ys = X[idx_span], Y[idx_span]

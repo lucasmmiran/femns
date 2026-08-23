@@ -4,7 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>femns · GUI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
+  <script>
+    // aplica o tema salvo antes do primeiro paint, pra nao piscar o tema errado
+    document.documentElement.setAttribute("data-theme", localStorage.getItem("femns-theme") || "dark");
+  </script>
 </head>
 <body>
   <header class="topbar">
@@ -13,6 +19,7 @@
       <button class="tab-btn active" data-screen="nova">Nova simulação</button>
       <button class="tab-btn" data-screen="resultados">Resultados</button>
     </nav>
+    <button type="button" id="theme-toggle" class="theme-toggle" title="Alternar tema claro/escuro"></button>
   </header>
 
   <main>
@@ -95,14 +102,13 @@
               <option value="dirichlet">dirichlet</option>
             </select>
           </label>
-          <p class="hint" id="warn-tri6-sl" hidden>advection=semi_lagrangian não é suportado com element=tri6.</p>
 
           <h3>Condições de contorno</h3>
           <p class="hint">Ordem da lista = prioridade (mais baixa no topo). Marque os componentes restringidos por contorno.</p>
           <ul id="boundary-list" class="boundary-list"></ul>
 
           <details class="advanced">
-            <summary>Avançado: ponto móvel / malha móvel (ALE)</summary>
+            <summary>Avançado: ponto móvel / malha móvel</summary>
 
             <fieldset class="advanced-block">
               <legend>Ponto móvel (moving_point)</legend>
@@ -236,6 +242,9 @@
               <div id="r-colorbar-grad" class="colorbar-grad"></div>
               <div class="colorbar-labels">
                 <span id="r-cb-max">–</span>
+                <span id="r-cb-q3">–</span>
+                <span id="r-cb-q2">–</span>
+                <span id="r-cb-q1">–</span>
                 <span id="r-cb-min">–</span>
               </div>
             </div>

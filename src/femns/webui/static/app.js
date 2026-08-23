@@ -1,6 +1,30 @@
 "use strict";
 
 // ---------------------------------------------------------------------
+// tema (claro/escuro) -- o atributo data-theme ja foi aplicado inline no
+// <head> (evita flash do tema errado); aqui so sincroniza o rotulo do
+// botao e liga o clique.
+// ---------------------------------------------------------------------
+
+(function initTheme() {
+  const KEY = "femns-theme";
+  const btn = document.getElementById("theme-toggle");
+
+  function apply(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    if (btn) btn.textContent = theme === "light" ? "☾ escuro" : "☀ claro";
+  }
+
+  apply(document.documentElement.getAttribute("data-theme") || "dark");
+
+  btn?.addEventListener("click", () => {
+    const next = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
+    localStorage.setItem(KEY, next);
+    apply(next);
+  });
+})();
+
+// ---------------------------------------------------------------------
 // utilidades
 // ---------------------------------------------------------------------
 
@@ -206,11 +230,41 @@ const NovaSimulacao = (() => {
     });
   }
 
+  // Cada componente (vx/vy/p) de um contorno pode ser um valor constante
+  // (input numerico normal) ou uma expressao Python de y absoluto (ex.
+  // "4*y*(1-y)", ver boundary.funcao_de_y) -- o botao fn-toggle alterna
+  // entre os dois. O modo atual fica em `label.dataset.mode` ("const",
+  // default, ou "func"); `.comp-value` identifica o input de valor
+  // independente do `type` atual (que muda entre number/text).
   function comp(boundaryName, campo) {
     const cb = el("input", { type: "checkbox", "data-comp": campo });
-    const num = el("input", { type: "number", step: "any", value: "0", disabled: "disabled" });
-    cb.addEventListener("change", () => { num.disabled = !cb.checked; });
-    return el("label", { class: "comp" }, [cb, el("span", { text: campo }), num]);
+    const num = el("input", {
+      type: "number", step: "any", value: "0", disabled: "disabled", class: "comp-value",
+    });
+    const fnBtn = el("button", {
+      type: "button", class: "fn-toggle", disabled: "disabled",
+      title: "Alternar entre valor constante e função de y", text: "ƒ(y)",
+    });
+    const label = el("label", { class: "comp" }, [cb, el("span", { text: campo }), num, fnBtn]);
+    cb.addEventListener("change", () => {
+      num.disabled = !cb.checked;
+      fnBtn.disabled = !cb.checked;
+    });
+    fnBtn.addEventListener("click", () => setCompMode(label, num, label.dataset.mode !== "func"));
+    return label;
+  }
+
+  function setCompMode(label, num, isFunc) {
+    label.dataset.mode = isFunc ? "func" : "const";
+    if (isFunc) {
+      num.type = "text";
+      num.placeholder = "ex.: 4*y*(1-y)";
+      if (num.value === "0") num.value = "";
+    } else {
+      num.type = "number";
+      num.placeholder = "";
+      if (num.value.trim() === "") num.value = "0";
+    }
   }
 
   function moveBoundary(idx, delta) {
@@ -232,16 +286,27 @@ const NovaSimulacao = (() => {
       const row = document.querySelector(`.boundary-row[data-name="${CSS.escape(nome)}"]`);
       if (!row) continue;
       for (const campo of ["vx", "vy", "p"]) {
-        // condicao com perfil (ex. {perfil: parabolico, vmax: ...}, ver
-        // boundary.valores_da_condicao) nao tem editor aqui ainda -- pula
-        // em vez de jogar "[object Object]" no campo numerico.
-        if (!(campo in valores) || typeof valores[campo] !== "number") continue;
+        const valor = valores[campo];
+        if (valor == null) continue;
         const label = [...row.querySelectorAll(".comp")].find((l) => l.querySelector("span").textContent === campo);
         const cb = label.querySelector("input[type=checkbox]");
-        const num = label.querySelector("input[type=number]");
+        const fnBtn = label.querySelector(".fn-toggle");
+        const num = label.querySelector(".comp-value");
+        if (typeof valor === "number") {
+          setCompMode(label, num, false);
+          num.value = valor;
+        } else if (valor && typeof valor === "object" && typeof valor.funcao === "string") {
+          setCompMode(label, num, true);
+          num.value = valor.funcao;
+        } else {
+          // outra forma de dict (ex. {perfil: parabolico, vmax: ...}) nao
+          // tem editor aqui ainda -- pula em vez de jogar "[object Object]"
+          // no campo de valor.
+          continue;
+        }
         cb.checked = true;
         num.disabled = false;
-        num.value = valores[campo];
+        fnBtn.disabled = false;
       }
     }
   }
@@ -254,8 +319,14 @@ const NovaSimulacao = (() => {
       for (const label of row.querySelectorAll(".comp")) {
         const campo = label.querySelector("span").textContent;
         const cb = label.querySelector("input[type=checkbox]");
-        const num = label.querySelector("input[type=number]");
-        if (cb.checked) valores[campo] = parseFloat(num.value);
+        const num = label.querySelector(".comp-value");
+        if (!cb.checked) continue;
+        if (label.dataset.mode === "func") {
+          const expr = num.value.trim();
+          if (expr) valores[campo] = { funcao: expr };
+        } else {
+          valores[campo] = parseFloat(num.value);
+        }
       }
       if (Object.keys(valores).length) conditions[nome] = valores;
     }
@@ -341,11 +412,7 @@ const NovaSimulacao = (() => {
 
   function updateAdvectionUI() {
     const advection = document.getElementById("f-advection").value;
-    const element = document.getElementById("f-element").value;
     document.getElementById("f-sl-boundary-wrap").style.display = advection === "semi_lagrangian" ? "" : "none";
-    const blocked = advection === "semi_lagrangian" && element === "tri6";
-    document.getElementById("warn-tri6-sl").hidden = !blocked;
-    document.querySelector('#form-nova button[type="submit"]').disabled = blocked;
   }
 
   // -- template (unifica templates do projeto + configuracoes salvas) ---
@@ -582,7 +649,10 @@ const Resultados = (() => {
   let line = null; // {x1,y1,x2,y2} em coordenadas fisicas, ou null
   let drawingLine = false;
   let drawFirstPoint = null; // primeiro clique, enquanto aguarda o segundo
-  let currentTransform = null; // {x0,y0,scale,offX,offY} do ultimo render(), pra converter clique -> mundo
+  let currentTransform = null; // {x0,y0,scale,offX,offY,zoom,panX,panY} do ultimo render(), pra converter clique -> mundo
+  // zoom (scroll) / pan (arrastar com o botao direito) sobre o campo --
+  // aplicado por cima do ajuste automatico de bbox, nao no lugar dele.
+  let viewState = { zoom: 1, panX: 0, panY: 0 };
   let savedOverlays = []; // plotagens carregadas de arquivo: {name, campo, color, samples, length}
   const OVERLAY_PALETTE = ["#f5a623", "#4caf7d", "#c77dff", "#f472b6", "#2dd4bf", "#a3e635", "#ff6b6b"];
 
@@ -670,10 +740,17 @@ const Resultados = (() => {
       stops.push(`${color} ${(i / ndiv) * 100}%`, `${color} ${((i + 1) / ndiv) * 100}%`);
     }
     // "to top": posicao 0% = base (min), 100% = topo (max) -- bate com os
-    // rotulos (max em cima, min embaixo, ver .colorbar-labels).
+    // rotulos (max em cima, min embaixo, ver .colorbar-labels). Os rotulos
+    // intermediarios (1/4, 1/2, 3/4) usam a mesma ordem, de cima pra baixo
+    // -- ".colorbar-labels" e' flex coluna com space-between, entao 5
+    // rotulos caem sozinhos em 100/75/50/25/0% da barra.
     document.getElementById("r-colorbar-grad").style.background = `linear-gradient(to top, ${stops.join(",")})`;
-    document.getElementById("r-cb-max").textContent = vmax.toPrecision(4);
-    document.getElementById("r-cb-min").textContent = vmin.toPrecision(4);
+    const passo = (vmax - vmin) / 4;
+    document.getElementById("r-cb-max").textContent = vmax.toFixed(5);
+    document.getElementById("r-cb-q3").textContent = (vmin + 3 * passo).toFixed(2);
+    document.getElementById("r-cb-q2").textContent = (vmin + 2 * passo).toFixed(2);
+    document.getElementById("r-cb-q1").textContent = (vmin + 1 * passo).toFixed(2);
+    document.getElementById("r-cb-min").textContent = vmin.toFixed(5);
   }
 
   // Passo "redondo" (1/2/5 * 10^n) pra grade de coordenadas ter ~`target`
@@ -991,8 +1068,10 @@ const Resultados = (() => {
   }
 
   function toWorld(px, py) {
-    const { x0, y0, scale, offX, offY } = currentTransform;
-    return [(px - offX) / scale + x0, (canvas.height - py - offY) / scale + y0];
+    const { x0, y0, scale, offX, offY, zoom, panX, panY } = currentTransform;
+    const bx = (px - panX) / zoom;
+    const by = (py - panY) / zoom;
+    return [(bx - offX) / scale + x0, (canvas.height - by - offY) / scale + y0];
   }
 
   function eventToCanvasPx(ev) {
@@ -1138,9 +1217,17 @@ const Resultados = (() => {
     const offX = margin + (w - scale * (x1 - x0)) / 2;
     const offY = margin + (h - scale * (y1 - y0)) / 2;
     const toPx = (x, y) => [offX + (x - x0) * scale, canvas.height - (offY + (y - y0) * scale)];
-    currentTransform = { x0, y0, scale, offX, offY };
+    currentTransform = { x0, y0, scale, offX, offY, zoom: viewState.zoom, panX: viewState.panX, panY: viewState.panY };
 
+    // limpa em coordenadas de tela (identidade), antes de aplicar zoom/pan --
+    // senao clearRect precisaria da area em coordenadas de "mundo do pixel
+    // base", que muda a cada zoom.
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    ctx.save();
+    ctx.translate(viewState.panX, viewState.panY);
+    ctx.scale(viewState.zoom, viewState.zoom);
+
     const showMesh = document.getElementById("r-mesh-toggle").checked;
     const showGrid = document.getElementById("r-grid-toggle").checked;
     const smooth = document.getElementById("r-smooth-toggle").checked;
@@ -1152,7 +1239,7 @@ const Resultados = (() => {
 
     if (showMesh) {
       ctx.strokeStyle = "rgba(255,255,255,0.15)";
-      ctx.lineWidth = 0.5;
+      ctx.lineWidth = 0.5 / viewState.zoom;
       for (const tri of frame.triangles) {
         const [a, b, c] = tri;
         const [ax, ay] = toPx(frame.points[a][0], frame.points[a][1]);
@@ -1170,7 +1257,60 @@ const Resultados = (() => {
     if (showGrid) drawGeometricGrid(x0, x1, y0, y1, toPx);
 
     drawLineOverlay(toPx);
+    ctx.restore();
+
     updateLinePlot(frame, valores);
+  }
+
+  // -- zoom (scroll) / pan (arrastar com botao direito) sobre o campo -----
+
+  function bindViewportControls() {
+    canvas.addEventListener("contextmenu", (ev) => ev.preventDefault());
+
+    canvas.addEventListener("wheel", (ev) => {
+      if (!currentTransform) return;
+      ev.preventDefault();
+      const [mx, my] = eventToCanvasPx(ev);
+      const fator = Math.exp(-ev.deltaY * 0.0015);
+      const novoZoom = Math.min(30, Math.max(0.2, viewState.zoom * fator));
+      // mantem o ponto do campo sob o cursor fixo na tela ao mudar o zoom
+      const baseX = (mx - viewState.panX) / viewState.zoom;
+      const baseY = (my - viewState.panY) / viewState.zoom;
+      viewState.panX = mx - novoZoom * baseX;
+      viewState.panY = my - novoZoom * baseY;
+      viewState.zoom = novoZoom;
+      rerender();
+    }, { passive: false });
+
+    let panning = false;
+    let lastPx = null;
+    canvas.addEventListener("mousedown", (ev) => {
+      if (ev.button !== 2) return; // so botao direito
+      panning = true;
+      lastPx = eventToCanvasPx(ev);
+      canvas.style.cursor = "grabbing";
+      ev.preventDefault();
+    });
+    window.addEventListener("mousemove", (ev) => {
+      if (!panning) return;
+      const [px, py] = eventToCanvasPx(ev);
+      viewState.panX += px - lastPx[0];
+      viewState.panY += py - lastPx[1];
+      lastPx = [px, py];
+      rerender();
+    });
+    window.addEventListener("mouseup", (ev) => {
+      if (ev.button !== 2 || !panning) return;
+      panning = false;
+      canvas.style.cursor = drawingLine ? "crosshair" : "";
+    });
+
+    // atalho pra sair do zoom/pan sem precisar caçar a proporcao certa
+    canvas.addEventListener("dblclick", () => {
+      if (drawingLine) return; // nao interfere no fluxo de desenhar linha
+      viewState = { zoom: 1, panX: 0, panY: 0 };
+      rerender();
+    });
   }
 
   async function getFrame(n) {
@@ -1212,6 +1352,7 @@ const Resultados = (() => {
 
   async function loadRun(runId) {
     stopPlay();
+    viewState = { zoom: 1, panX: 0, panY: 0 }; // simulacao nova = geometria nova, comeca sem zoom/pan
     currentRun = { id: runId, meta: await api(`/api/results/${runId}/meta`) };
     frameNumbers = [];
     for (let n = currentRun.meta.first_frame; n <= currentRun.meta.last_frame; n++) frameNumbers.push(n);
@@ -1270,7 +1411,7 @@ const Resultados = (() => {
 
   let initialized = false;
   async function onShow() {
-    if (!initialized) { bindControls(); bindLineControls(); initialized = true; }
+    if (!initialized) { bindControls(); bindLineControls(); bindViewportControls(); initialized = true; }
     await refreshRuns();
     const sel = document.getElementById("r-run");
     if (sel.value && sel.value !== loadedForRun) await loadRun(sel.value);

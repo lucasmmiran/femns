@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from femns.boundary import assign_boundary_names, build_boundary_conditions, perfil_parabolico
+from femns.boundary import assign_boundary_names, build_boundary_conditions, funcao_de_y, perfil_parabolico
 
 
 def quadrado_com_contornos():
@@ -223,6 +223,80 @@ def test_perfil_usa_extensao_geometrica_nao_os_nos_restantes():
     esperado = 6.0 * Y * (1.0 - Y)  # ancorado nas paredes reais
     assert np.allclose(vx_cc.numpy(), esperado), f"{vx_cc.numpy()} != {esperado}"
     assert np.isclose(vx_cc[2].item(), 1.5)  # pico no centro do canal
+
+
+def test_funcao_de_y_avalia_expressao():
+    y = np.array([0.0, 0.5, 1.0])
+    v = funcao_de_y("4*y*(1-y)", y)
+    assert np.allclose(v, [0.0, 1.0, 0.0])
+
+
+def test_funcao_de_y_aceita_funcoes_numpy_permitidas():
+    y = np.array([0.0, np.pi / 2, np.pi])
+    v = funcao_de_y("sin(y)", y)
+    assert np.allclose(v, [0.0, 1.0, 0.0], atol=1e-12)
+
+
+def test_funcao_de_y_constante_faz_broadcast():
+    y = np.array([0.0, 0.5, 1.0])
+    v = funcao_de_y("2.5", y)
+    assert np.allclose(v, [2.5, 2.5, 2.5])
+
+
+def test_funcao_de_y_expressao_invalida_leva_a_value_error():
+    y = np.array([0.0, 1.0])
+    try:
+        funcao_de_y("y +", y)
+    except ValueError as e:
+        assert "expressao de contorno invalida" in str(e)
+    else:
+        raise AssertionError("deveria ter levantado ValueError")
+
+
+def test_funcao_de_y_nome_nao_permitido_leva_a_value_error():
+    # __import__ (ou qualquer builtin) nao esta no ambiente liberado --
+    # NameError capturado e' reembalado em ValueError com a expressao.
+    y = np.array([0.0, 1.0])
+    try:
+        funcao_de_y("__import__('os').system('echo oi')", y)
+    except ValueError as e:
+        assert "expressao de contorno invalida" in str(e)
+    else:
+        raise AssertionError("deveria ter levantado ValueError")
+
+
+def test_build_boundary_conditions_com_funcao_de_y():
+    """Igual ao teste do perfil parabolico, mas com {"funcao": ...} -- usa
+    o y absoluto do no (sem normalizar pela extensao do contorno, ao
+    contrario do perfil parabolico).
+    """
+    X = np.array([0.0, 0.0, 0.0])
+    Y = np.array([0.0, 0.5, 1.0])
+    IENbound = np.array([[0, 1], [1, 2]])
+    ccName = ["inlet", "inlet", "inlet"]
+    conditions = {"inlet": {"vx": {"funcao": "4*y*(1-y)"}, "vy": 0.0}}
+
+    vx_cc, vy_cc, _, vx_pts, _, _ = build_boundary_conditions(
+        IENbound, ccName, conditions, npoints=3, device=torch.device("cpu"), X=X, Y=Y)
+
+    assert np.isclose(vx_cc[0].item(), 0.0)
+    assert np.isclose(vx_cc[1].item(), 1.0)
+    assert np.isclose(vx_cc[2].item(), 0.0)
+    assert set(vx_pts.tolist()) == {0, 1, 2}
+    assert torch.allclose(vy_cc, torch.zeros(3, dtype=torch.float64))
+
+
+def test_build_boundary_conditions_dict_desconhecido_falha():
+    IENbound = np.array([[0, 1]])
+    conditions = {"inlet": {"vx": {"perfil": "senoidal"}}}
+    X = Y = np.array([0.0, 1.0])
+    try:
+        build_boundary_conditions(IENbound, ["inlet", "inlet"], conditions,
+                                   npoints=2, device=torch.device("cpu"), X=X, Y=Y)
+    except ValueError as e:
+        assert "condicao de contorno desconhecida" in str(e)
+    else:
+        raise AssertionError("deveria ter levantado ValueError")
 
 
 def test_perfil_sem_IENboundElem_usa_os_proprios_nos():
