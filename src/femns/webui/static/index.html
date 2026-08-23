@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>femns · GUI</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>femns</h1>
+    <nav class="tabs">
+      <button class="tab-btn active" data-screen="nova">Nova simulação</button>
+      <button class="tab-btn" data-screen="resultados">Resultados</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- ============ TELA: NOVA SIMULAÇÃO ============ -->
+    <section id="screen-nova" class="screen active">
+      <div class="columns">
+        <form id="form-nova" class="panel">
+          <h2>Configuração</h2>
+
+          <label class="field">
+            <span>Malha</span>
+            <select id="f-mesh" required></select>
+          </label>
+
+          <div class="mesh-preview">
+            <div class="mesh-preview-canvas-wrap">
+              <canvas id="mesh-preview-canvas" width="420" height="280"></canvas>
+              <button type="button" id="mesh-expand-btn" class="icon-btn expand-btn" title="Ampliar visualização da malha">⤢</button>
+            </div>
+            <div id="mesh-preview-legend" class="mesh-legend"></div>
+          </div>
+
+          <h3>Template</h3>
+          <label class="field">
+            <span>Template</span>
+            <div class="row-inline">
+              <select id="f-template">
+                <option value="">— nenhum —</option>
+              </select>
+              <button type="button" id="f-template-delete" class="icon-btn" title="Excluir template salvo" disabled>🗑</button>
+            </div>
+          </label>
+          <label class="field">
+            <span>Rótulo</span>
+            <div class="row-inline">
+              <input id="f-label" type="text" placeholder="ex.: degrau-teste-1">
+              <button type="button" id="f-save-config" class="icon-btn icon-btn-accent" title="Salvar como template">✓</button>
+            </div>
+          </label>
+          <p class="error" id="form-error" hidden></p>
+          <p class="hint" id="save-ok" hidden></p>
+
+          <h3>Parâmetros</h3>
+          <fieldset class="grid3">
+            <label class="field">
+              <span>dt</span>
+              <input id="f-dt" type="number" step="any" min="0" value="0.01" required>
+            </label>
+            <label class="field">
+              <span>Iterações</span>
+              <input id="f-iterations" type="number" step="1" min="1" value="200" required>
+            </label>
+            <label class="field">
+              <span>Reynolds</span>
+              <input id="f-reynolds" type="number" step="any" min="0" value="1" required>
+            </label>
+          </fieldset>
+
+          <h3>Métodos</h3>
+          <fieldset class="grid2">
+            <label class="field">
+              <span>Advecção</span>
+              <select id="f-advection">
+                <option value="eulerian">eulerian</option>
+                <option value="semi_lagrangian">semi_lagrangian</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Elemento</span>
+              <select id="f-element">
+                <option value="mini">mini</option>
+                <option value="tri6">tri6</option>
+              </select>
+            </label>
+          </fieldset>
+          <label class="field" id="f-sl-boundary-wrap">
+            <span>Tratamento de contorno (SL)</span>
+            <select id="f-sl-boundary">
+              <option value="intercept">intercept</option>
+              <option value="dirichlet">dirichlet</option>
+            </select>
+          </label>
+          <p class="hint" id="warn-tri6-sl" hidden>advection=semi_lagrangian não é suportado com element=tri6.</p>
+
+          <h3>Condições de contorno</h3>
+          <p class="hint">Ordem da lista = prioridade (mais baixa no topo). Marque os componentes restringidos por contorno.</p>
+          <ul id="boundary-list" class="boundary-list"></ul>
+
+          <details class="advanced">
+            <summary>Avançado: ponto móvel / malha móvel (ALE)</summary>
+
+            <fieldset class="advanced-block">
+              <legend>Ponto móvel (moving_point)</legend>
+              <label class="field-inline"><input id="mp-enabled" type="checkbox"> habilitado</label>
+              <div class="grid3">
+                <label class="field"><span>node_index</span><input id="mp-node" type="number" step="1" min="0" value="0"></label>
+                <label class="field"><span>amplitude_factor</span><input id="mp-amp" type="number" step="any" value="0.1"></label>
+                <label class="field"><span>omega</span><input id="mp-omega" type="number" step="any" value="628.3185307179587"></label>
+              </div>
+            </fieldset>
+
+            <fieldset class="advanced-block">
+              <legend>Malha móvel (mesh_motion)</legend>
+              <label class="field-inline"><input id="mm-enabled" type="checkbox"> habilitado</label>
+              <div class="grid3">
+                <label class="field"><span>amplitude_factor (× h local)</span><input id="mm-amp" type="number" step="any" value="0.3"></label>
+                <label class="field"><span>omega</span><input id="mm-omega" type="number" step="any" value="31.41593"></label>
+                <label class="field"><span>seed</span><input id="mm-seed" type="number" step="1" value="0"></label>
+              </div>
+            </fieldset>
+          </details>
+
+          <button type="submit" class="primary">Rodar simulação</button>
+        </form>
+
+        <div class="panel">
+          <h2>Simulações</h2>
+          <div id="jobs-list" class="jobs-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ TELA: RESULTADOS ============ -->
+    <section id="screen-resultados" class="screen">
+      <div class="columns">
+        <div class="panel viewer-config-panel">
+          <h2>Visualização</h2>
+
+          <h3>Simulação salva</h3>
+          <label class="field">
+            <span>Simulação</span>
+            <div class="row-inline">
+              <select id="r-run"></select>
+              <button type="button" id="r-refresh" class="icon-btn" title="Atualizar lista">⟳</button>
+            </div>
+          </label>
+
+          <h3>Campo</h3>
+          <label class="field">
+            <span>Variável</span>
+            <select id="r-field">
+              <option value="vx">vx</option>
+              <option value="vy">vy</option>
+              <option value="p">p</option>
+              <option value="mag">|v|</option>
+            </select>
+          </label>
+          <label class="field-inline"><input id="r-mesh-toggle" type="checkbox"> malha de elementos</label>
+          <label class="field-inline"><input id="r-smooth-toggle" type="checkbox" checked> suavizar cor (interpolar entre nós)</label>
+
+          <h3>Quadros</h3>
+          <div class="playback">
+            <div class="playback-buttons">
+              <button id="r-first" title="Primeiro quadro">⏮</button>
+              <button id="r-step-back" title="Quadro anterior">◀</button>
+              <button id="r-play" title="Play/Pausa">▶</button>
+              <button id="r-step-fwd" title="Próximo quadro">▶|</button>
+              <button id="r-last" title="Último quadro">⏭</button>
+            </div>
+            <input id="r-slider" type="range" min="0" max="0" value="0" step="1">
+            <div class="playback-info">
+              <span id="r-frame-label">–</span>
+              <label class="field-inline">FPS <input id="r-fps" type="number" min="1" max="60" value="12" style="width:3.5em"></label>
+            </div>
+          </div>
+
+          <h3>Barra de cores</h3>
+          <label class="field">
+            <span>Preset</span>
+            <select id="r-colorbar-preset">
+              <option value="jet">JET</option>
+              <option value="coolwarm">Cool to Warm (ParaView)</option>
+              <option value="viridis">Viridis (matplotlib)</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Divisões</span>
+            <input id="r-colorbar-divisions" type="number" min="2" max="64" step="1" value="20">
+          </label>
+
+          <h3>Gráfico sobre linha</h3>
+          <p class="hint">Marque dois pontos sobre o campo à direita para traçar a linha.</p>
+          <div class="row-inline">
+            <button type="button" id="r-line-draw" class="icon-btn">Desenhar linha</button>
+            <button type="button" id="r-line-clear" class="icon-btn" title="Remover linha" disabled>🗑</button>
+          </div>
+          <label class="field-inline"><input id="r-line-toggle" type="checkbox" disabled> mostrar linha sobre o campo</label>
+          <fieldset class="grid2">
+            <label class="field"><span>x1</span><input id="r-line-x1" type="number" step="any"></label>
+            <label class="field"><span>y1</span><input id="r-line-y1" type="number" step="any"></label>
+            <label class="field"><span>x2</span><input id="r-line-x2" type="number" step="any"></label>
+            <label class="field"><span>y2</span><input id="r-line-y2" type="number" step="any"></label>
+          </fieldset>
+          <label class="field">
+            <span>Pontos de amostragem</span>
+            <input id="r-line-samples" type="number" min="2" max="2000" step="1" value="200">
+          </label>
+          <label class="field">
+            <span>Nome desta plotagem</span>
+            <input id="r-line-name" type="text" placeholder="ex.: degrau-vx-t1000">
+          </label>
+          <div class="row-inline">
+            <button type="button" id="r-line-save" class="icon-btn" disabled>Salvar plotagem</button>
+            <button type="button" id="r-line-load" class="icon-btn">Carregar plotagem</button>
+          </div>
+          <input type="file" id="r-line-file" accept="application/json" hidden>
+          <ul id="r-line-overlays" class="overlay-list"></ul>
+        </div>
+
+        <div class="panel viewer-panel">
+          <div class="viewer-toolbar">
+            <label class="field-inline">Cor de fundo <input id="r-bg-color" type="color" value="#0b0d10"></label>
+            <label class="field-inline"><input id="r-grid-toggle" type="checkbox"> grid geométrico</label>
+          </div>
+
+          <div class="viewer-stage">
+            <div id="r-canvas-wrap" class="viewer-canvas-wrap">
+              <canvas id="r-canvas" width="900" height="600"></canvas>
+            </div>
+            <div class="colorbar">
+              <div id="r-colorbar-grad" class="colorbar-grad"></div>
+              <div class="colorbar-labels">
+                <span id="r-cb-max">–</span>
+                <span id="r-cb-min">–</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="line-plot-panel">
+            <div class="line-plot-header">
+              <h3>Gráfico sobre a linha</h3>
+              <span id="r-line-hint" class="hint">Nenhuma linha definida.</span>
+            </div>
+            <div id="r-line-canvas-wrap" class="line-canvas-wrap">
+              <canvas id="r-line-canvas" width="900" height="220"></canvas>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="mesh-modal" class="modal-overlay" hidden>
+    <div class="modal-box">
+      <button type="button" id="mesh-modal-close" class="modal-close" title="Fechar">✕</button>
+      <canvas id="mesh-modal-canvas" width="1100" height="750"></canvas>
+      <div id="mesh-modal-legend" class="mesh-legend"></div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 """Registro de metricas de simulacao numa planilha .xlsx acumulada (1 linha por run).
 
-Pensado pra comparar simulacoes entre si (ex.: `explicit` vs `semi_lagrangian`,
+Pensado pra comparar simulacoes entre si (ex.: `eulerian` vs `semi_lagrangian`,
 diferentes `dt`/malha/Re) numa tabela unica, nao pra analise por-iteracao
 dentro de um unico run -- ver `scripts/run_simulation.py` sobre quais
 metricas sao agregadas (media/max) antes de virar uma linha aqui.

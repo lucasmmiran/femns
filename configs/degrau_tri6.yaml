@@ -6,7 +6,7 @@ simulation:
   dt: 0.01
   iterations: 1000
   reynolds: 1
-  advection: explicit  # explicit (padrao, hoje) ou semi_lagrangian
+  advection: eulerian  # eulerian (padrao) ou semi_lagrangian
   element: tri6  # mini (padrao) ou tri6
 
 boundary:

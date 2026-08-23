@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Sobe a interface web opcional do femns (ver README.md, secao "Interface web").
+# Uso: ./femns-gui [--port PORTA] [--no-browser]
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$DIR"
+
+# Venv ao lado deste script por padrao (`python3 -m venv .venv` na raiz do
+# projeto, ver README.md); FEMNS_VENV aponta pra outro venv sem precisar
+# editar o script (util em worktree/checkout separado do venv instalado).
+VENV="${FEMNS_VENV:-$DIR/.venv}"
+if [ -x "$VENV/bin/python3" ]; then
+    PYTHON="$VENV/bin/python3"
+else
+    PYTHON="$(command -v python3)"
+fi
+
+if ! "$PYTHON" -c "import femns" >/dev/null 2>&1; then
+    echo "Erro: pacote 'femns' nao encontrado em $PYTHON." >&2
+    echo "Instale antes de usar este executavel (ver README.md):" >&2
+    echo "  python3 -m venv .venv && source .venv/bin/activate && pip install -e \".[test]\"" >&2
+    echo "Ou aponte para um venv ja existente: FEMNS_VENV=/caminho/para/.venv $0" >&2
+    exit 1
+fi
+
+# ROCm: placas RX 6xxx (gfx1031) so rodam com HSA_OVERRIDE_GFX_VERSION, que
+# normalmente vem do ~/.bashrc -- lido so em shell interativo. Se a GUI for
+# aberta por lancador de aplicativo, atalho ou terminal de IDE, o subprocesso
+# da simulacao herda um ambiente sem o override e o ROCm aborta dentro do
+# kernel, sem traceback nenhum. Sobrescreva com FEMNS_HSA_OVERRIDE se a sua
+# placa precisar de outro valor.
+if [ -z "${HSA_OVERRIDE_GFX_VERSION:-}" ] \
+   && "$PYTHON" -c "import sys, torch; sys.exit(0 if torch.version.hip else 1)" >/dev/null 2>&1; then
+    export HSA_OVERRIDE_GFX_VERSION="${FEMNS_HSA_OVERRIDE:-10.3.0}"
+    echo "Aviso: HSA_OVERRIDE_GFX_VERSION nao estava definido (torch ROCm); usando $HSA_OVERRIDE_GFX_VERSION." >&2
+fi
+
+exec "$PYTHON" scripts/run_gui.py "$@"

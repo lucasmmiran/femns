@@ -1,7 +1,16 @@
 import meshio
 import numpy as np
 
-from femns.mesh import _mesh_from_raw, elem_mini, elem_tri6, estende_IENbound_tri6, montar_EToE, montar_node_to_elem, montar_NToN
+from femns.mesh import (
+    _mesh_from_raw,
+    elem_mini,
+    elem_tri6,
+    estende_IENbound_tri6,
+    montar_edge_to_elem,
+    montar_EToE,
+    montar_node_to_elem,
+    montar_NToN,
+)
 
 
 def quadrado_dois_triangulos():
@@ -50,6 +59,30 @@ def test_montar_node_to_elem():
     # No 1 so pertence ao elemento 0, no 3 so ao elemento 1.
     assert node_to_elem[1] == 0
     assert node_to_elem[3] == 1
+
+
+def test_montar_edge_to_elem():
+    """Semente de caminhada para os nos de aresta do Tri6 -- analogo a
+    `test_montar_node_to_elem`, mas para os nos extras de aresta em vez
+    dos vertices (ver `semi_lagrangian.calculo_sl`, parametro
+    `elem_start_extra`)."""
+    X, Y, IEN0 = quadrado_dois_triangulos()
+    IEN, _, _, edge_para_no = elem_tri6(IEN0, X, Y)
+    npoints = 4
+    n_extra = len(edge_para_no)
+
+    edge_to_elem = montar_edge_to_elem(IEN, npoints, n_extra)
+
+    assert edge_to_elem.shape == (n_extra,)
+    # No de aresta (0,1) e (1,2) so pertencem ao elemento 0.
+    assert edge_to_elem[edge_para_no[(0, 1)] - npoints] == 0
+    assert edge_to_elem[edge_para_no[(1, 2)] - npoints] == 0
+    # No de aresta (2,3) e (3,0) so pertencem ao elemento 1.
+    assert edge_to_elem[edge_para_no[(2, 3)] - npoints] == 1
+    assert edge_to_elem[edge_para_no[(0, 3)] - npoints] == 1
+    # No da diagonal (0,2) e compartilhado -- o primeiro elemento
+    # encontrado ao varrer IEN e o elemento 0.
+    assert edge_to_elem[edge_para_no[(0, 2)] - npoints] == 0
 
 
 def test_elem_mini_adiciona_centroide():

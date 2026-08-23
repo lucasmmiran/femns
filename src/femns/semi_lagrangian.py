@@ -17,6 +17,8 @@ como o codigo de referencia do professor em
 
 import numpy as np
 
+from femns.boundary import valores_da_condicao
+
 
 def backtrace(x: np.ndarray, y: np.ndarray, vx_node: np.ndarray, vy_node: np.ndarray, dt: float):
     """Pe da caracteristica por Euler explicito: x_d = x - dt*v(x).
@@ -166,30 +168,87 @@ def interpolar_mini(li: float, lj: float, lk: float, vi: float, vj: float, vk: f
     return Ni * vi + Nj * vj + Nk * vk + Nb * vb
 
 
-def _fallback_dirichlet(ccName: list, conditions: dict, npoints: int, n_total: int):
+def interpolar_tri6(li: float, lj: float, lk: float,
+                     vi: float, vj: float, vk: float,
+                     vij: float, vjk: float, vki: float):
+    """Avalia um campo do espaco Tri6 (base nodal P2) num ponto de coordenadas baricentricas dadas.
+
+    `vi, vj, vk` sao os valores nodais nos 3 vertices; `vij, vjk, vki`
+    os valores nos 3 nos de aresta (convencao de `mesh.elem_tri6`: `vij`
+    e' o no da aresta (i,j) -- a face local `f` do elemento tem seu no
+    de aresta na coluna `3+f` de `IEN`, na mesma ordem `arestas_locais =
+    [(0,1),(1,2),(2,0)]`). Os 6 DOFs sao nodais (mesma propriedade de
+    Lagrange do MINI, ver `interpolar_mini`) -- as funcoes de forma
+    correspondentes sao as do triangulo P2 padrao (Zienkiewicz vol. 1,
+    cap. 8, mesma base de `assembly.assemble_tri6`):
+    `Ni = li*(2*li - 1)` (e ciclicamente `Nj, Nk`) para os vertices e
+    `Nij = 4*li*lj` (e ciclicamente `Njk, Nki`) para os nos de aresta.
+
+    Igual ao MINI, os lambdas sao recortados para [0,1] e renormalizados
+    antes de usar como peso (ver `interpolar_mini` sobre o motivo e a
+    ressalva: essa politica de clamp foi herdada por analogia, nao
+    re-derivada para a base quadratica -- ver `docs/lambda.md`).
+    """
+    li, lj, lk = np.clip(li, 0.0, 1.0), np.clip(lj, 0.0, 1.0), np.clip(lk, 0.0, 1.0)
+    soma = li + lj + lk
+    li, lj, lk = li / soma, lj / soma, lk / soma
+
+    Ni, Nj, Nk = li * (2.0 * li - 1.0), lj * (2.0 * lj - 1.0), lk * (2.0 * lk - 1.0)
+    Nij, Njk, Nki = 4.0 * li * lj, 4.0 * lj * lk, 4.0 * lk * li
+
+    return Ni * vi + Nj * vj + Nk * vk + Nij * vij + Njk * vjk + Nki * vki
+
+
+def _fallback_dirichlet(ccName: list, conditions: dict, npoints: int, n_total: int,
+                         X: np.ndarray = None, Y: np.ndarray = None):
     """Monta, uma vez por chamada, os arrays de valor/disponibilidade de Dirichlet por no.
 
-    So os `npoints` nos de vertice tem nome de contorno (`ccName`); nos
-    de centroide ficam com `has_*_bc=False` sempre. Usado como fallback
-    vetorizado em `calculo_sl` para nos cujo pe da
+    So os `npoints` primeiros nos (vertices) sao consultados aqui --
+    `nomes = ccName[:npoints]` abaixo -- entao todo no extra (indice >=
+    `npoints`) sai desta funcao com `has_*_bc=False`, incondicionalmente.
+    Para o elemento MINI isso e' exatamente correto: o no de
+    centroide/bolha e' sempre interior ao elemento, nunca tem nome de
+    contorno de verdade. Para o elemento Tri6 isso e' uma limitacao real,
+    nao so' uma correcao de docstring: os nos de aresta que caem sobre o
+    contorno **tem** nome (`ccName` estendido por
+    `boundary.assign_boundary_names` ate `nnodes`, via
+    `mesh.estende_IENbound_tri6`), mas esta funcao os ignora do mesmo
+    jeito. Na pratica isso nao morde porque `run_simulation.py` sempre
+    passa `bc_dirichlet` ja resolvido por
+    `boundary.build_boundary_conditions` (que enxerga todos os `nnodes`
+    nos) em vez de deixar `calculo_sl` cair neste fallback -- ver
+    `calculo_sl`. Este fallback so e' de fato exercitado, hoje, por
+    chamadas diretas/testes sem `bc_dirichlet`, e la' so' para contorno
+    uniforme (ver aviso sobre perfil abaixo). Generalizar para nos de
+    aresta nomeados fica para quando/se este caminho precisar valer para
+    Tri6 tambem.
+
+    Usado como fallback vetorizado em `calculo_sl` para nos cujo pe da
     caracteristica saiu do dominio.
+
+    Agrupa por nome de contorno em vez de percorrer no a no: alem de ser
+    vetorizado, e' o que permite condicao com **perfil**
+    (`boundary.valores_da_condicao`), que precisa ver todos os nos daquele
+    contorno de uma vez para saber onde ficam as pontas. `X, Y` so sao
+    necessarios se algum contorno usar perfil.
     """
     vx_bc = np.zeros(n_total)
     vy_bc = np.zeros(n_total)
     has_vx_bc = np.zeros(n_total, dtype=bool)
     has_vy_bc = np.zeros(n_total, dtype=bool)
 
-    for n in range(npoints):
-        nome = ccName[n]
-        if nome is None:
+    nomes = np.array(ccName[:npoints], dtype=object)
+
+    for nome, valores in conditions.items():
+        idx = np.where(nomes == nome)[0]
+        if idx.size == 0:
             continue
-        valores = conditions.get(nome, {})
         if "vx" in valores:
-            vx_bc[n] = valores["vx"]
-            has_vx_bc[n] = True
+            vx_bc[idx] = valores_da_condicao(valores["vx"], idx, X, Y)
+            has_vx_bc[idx] = True
         if "vy" in valores:
-            vy_bc[n] = valores["vy"]
-            has_vy_bc[n] = True
+            vy_bc[idx] = valores_da_condicao(valores["vy"], idx, X, Y)
+            has_vy_bc[idx] = True
 
     return vx_bc, has_vx_bc, vy_bc, has_vy_bc
 
@@ -232,20 +291,37 @@ def interceptar_contorno(xn, yn, xd, yd, xb1, yb1, xb2, yb2, eps: float = 1e-14)
 def _fallback_interceptacao(X: np.ndarray, Y: np.ndarray, IEN: np.ndarray, xd: np.ndarray,
                              yd: np.ndarray, saida: np.ndarray, alvos: np.ndarray,
                              vx: np.ndarray, vy: np.ndarray, eps: float = 1e-14,
-                             X_no: np.ndarray = None, Y_no: np.ndarray = None):
+                             X_no: np.ndarray = None, Y_no: np.ndarray = None,
+                             elemento: str = "mini"):
     """Velocidade no ponto onde a caracteristica cruzou o contorno, por interpolacao na aresta.
 
     Para cada no marcado em `alvos` (booleano, os que sairam do dominio e
     tem face de saida registrada em `saida`), acha o cruzamento com a
     aresta de contorno (`interceptar_contorno`) e avalia o campo ali.
 
-    A interpolacao na aresta e' linear entre os dois vertices, sem termo
-    de bolha -- e' exato, nao uma aproximacao: sobre qualquer aresta do
-    triangulo uma das coordenadas baricentricas e' zero, entao a
-    correcao de bolha `9*li*lj*lk` das funcoes de forma do MINI se anula
-    e `Ni = li` (ver `interpolar_mini`). O campo MINI restrito a uma
-    aresta E' P1. Por isso o `Tri4.jumpToElem` da referencia tambem
-    devolve so os dois nos da aresta nesse caso.
+    **MINI** (`elemento="mini"`): a interpolacao na aresta e' linear
+    entre os dois vertices, sem termo de bolha -- e' exato, nao uma
+    aproximacao: sobre qualquer aresta do triangulo uma das coordenadas
+    baricentricas e' zero, entao a correcao de bolha `9*li*lj*lk` das
+    funcoes de forma do MINI se anula e `Ni = li` (ver
+    `interpolar_mini`). O campo MINI restrito a uma aresta E' P1. Por
+    isso o `Tri4.jumpToElem` da referencia tambem devolve so os dois nos
+    da aresta nesse caso.
+
+    **Tri6** (`elemento="tri6"`): pelo mesmo argumento (uma coordenada
+    baricentrica -- a do vertice oposto -- e' zero sobre a aresta), so
+    3 das 6 funcoes de forma do Tri6 sao nao-nulas ali: as dos 2
+    vertices da aresta e a do no de aresta correspondente; as outras 3
+    (vertice oposto e os 2 nos das outras arestas) se anulam porque tem
+    a coordenada do vertice oposto como fator (ver `interpolar_tri6`).
+    Com `s` a posicao relativa do cruzamento ao longo da aresta (`s=0`
+    no primeiro vertice, `s=1` no segundo -- `s = w2` abaixo), essas 3
+    funcoes de forma restritas a aresta sao os 3 polinomios de Lagrange
+    quadraticos em `s`: `(1-s)*(1-2*s)`, `s*(2*s-1)`, `4*s*(1-s)`. E'
+    exato para o campo Tri6 pelo mesmo motivo do MINI, so que com base
+    quadratica em vez de linear -- por isso precisa do no de aresta
+    (`IEN[e, 3+f]`, mesma convencao de `mesh.elem_tri6`), nao so os 2
+    vertices.
 
     `X, Y` sao a geometria em que o campo vive (a aresta de contorno);
     `X_no, Y_no` as posicoes de chegada dos nos (o ponto R1 do segmento).
@@ -271,7 +347,17 @@ def _fallback_interceptacao(X: np.ndarray, Y: np.ndarray, IEN: np.ndarray, xd: n
     ib1, ib2 = ib1[ok], ib2[ok]
     w1, w2 = w1[ok], w2[ok]
 
-    return idx[ok], w1 * vx[ib1] + w2 * vx[ib2], w1 * vy[ib1] + w2 * vy[ib2]
+    if elemento == "tri6":
+        ibm = IEN[e, 3 + f][ok]
+        s = w2  # w1*B1 + w2*B2 == (1-s)*B1 + s*B2
+        peso1, peso2, pesom = (1.0 - s) * (1.0 - 2.0 * s), s * (2.0 * s - 1.0), 4.0 * s * (1.0 - s)
+        vx_int = peso1 * vx[ib1] + peso2 * vx[ib2] + pesom * vx[ibm]
+        vy_int = peso1 * vy[ib1] + peso2 * vy[ib2] + pesom * vy[ibm]
+    else:
+        vx_int = w1 * vx[ib1] + w2 * vx[ib2]
+        vy_int = w1 * vy[ib1] + w2 * vy[ib2]
+
+    return idx[ok], vx_int, vy_int
 
 
 def calculo_sl(X: np.ndarray, Y: np.ndarray, IEN: np.ndarray, EToE: np.ndarray,
@@ -279,20 +365,55 @@ def calculo_sl(X: np.ndarray, Y: np.ndarray, IEN: np.ndarray, EToE: np.ndarray,
                                vx: np.ndarray, vy: np.ndarray, dt: float, npoints: int, ne: int,
                                tol: float = 1e-9, max_iter: int = 50,
                                fora_dominio: str = "intercept",
-                               X_campo: np.ndarray = None, Y_campo: np.ndarray = None):
+                               elemento: str = "mini",
+                               elem_start_extra: np.ndarray = None,
+                               X_campo: np.ndarray = None, Y_campo: np.ndarray = None,
+                               bc_dirichlet: tuple = None):
     """Avanca a adveccao por um passo semi-Lagrangeano: backtrace + localizacao + interpolacao.
 
-    `X, Y, IEN` sao os arrays completos (pos-`mesh.elem_mini`, com o no
-    de centroide/bolha na 4a coluna de `IEN`); `EToE` vem de
-    `mesh.montar_EToE` sobre a malha original (so vertices); `vx, vy`
-    sao os campos do passo atual (tamanho `npoints + ne`), em numpy.
+    `X, Y, IEN` sao os arrays completos (pos-`mesh.elem_mini` ou
+    `mesh.elem_tri6`, conforme `elemento`, com os nos extras nas colunas
+    depois da 3a de `IEN`); `EToE` vem de `mesh.montar_EToE` sobre a
+    malha original (so vertices, 3 colunas -- e' a mesma `EToE` para
+    qualquer `elemento`, a caminhada so anda por vertice); `vx, vy` sao
+    os campos do passo atual (tamanho `npoints` + numero de nos extras),
+    em numpy.
+
+    `elemento` escolhe a base de interpolacao usada nos nos localizados
+    dentro da malha:
+
+    - `"mini"` (padrao): 4 DOFs por elemento (3 vertices + 1
+      centroide/bolha, na 4a coluna de `IEN`), interpolados por
+      `interpolar_mini`.
+    - `"tri6"`: 6 DOFs por elemento (3 vertices + 3 nos de aresta, nas
+      colunas 3:6 de `IEN`, convencao de `mesh.elem_tri6`), interpolados
+      por `interpolar_tri6`.
 
     Vetorizado: calcula o pe da caracteristica de todos os nos de uma
     vez (Euler explicito, usando `vx/vy` diretamente -- os DOFs sao
-    todos nodais, inclusive o de centroide, ver `interpolar_mini`),
-    localiza todos em lote (`localizar_pontos_partida`, chute inicial
-    `node_to_elem[n]` para vertices ou `n - npoints` para nos de
-    centroide -- ver `mesh.montar_node_to_elem`) e interpola.
+    todos nodais, inclusive os extras, ver `interpolar_mini`/
+    `interpolar_tri6`), localiza todos em lote
+    (`localizar_pontos_partida`, chute inicial `node_to_elem[n]` para
+    vertices ou `elem_start_extra[n - npoints]` para nos extras -- ver
+    `mesh.montar_node_to_elem`/`mesh.montar_edge_to_elem`) e interpola.
+
+    `elem_start_extra` e' a semente de caminhada para os nos extras
+    (tamanho = numero de nos extras, isto e' `len(vx) - npoints`). Se
+    omitido, so e' valido para `elemento="mini"`: usa `np.arange(ne)`
+    (o no extra `npoints + e` E' o centroide do elemento `e`, unico caso
+    em que essa correspondencia direta existe -- ver a nota sobre `ne`
+    abaixo). Para `elemento="tri6"` e' obrigatorio, porque o no de
+    aresta nao tem uma unica "semente natural": ele e' compartilhado por
+    ate 2 elementos, nenhum privilegiado (ver `mesh.montar_edge_to_elem`,
+    que constroi essa semente varrendo `IEN[:, 3:6]`).
+
+    Nota sobre `ne`: e' o numero de elementos da malha (`mesh.ne`), nao
+    o numero de nos extras -- os dois coincidem so' no MINI (um
+    centroide por elemento). No Tri6 nao coincidem (nos de aresta sao
+    deduplicados entre vizinhos), por isso `ne` so' e' usado aqui para
+    construir o `elem_start_extra` default do MINI; o numero de nos
+    extras de fato usado (`n_total - npoints`) vem de `len(vx)`, nunca
+    de `ne` diretamente.
 
     `fora_dominio` escolhe o tratamento dos nos cujo pe da caracteristica
     caiu fora da malha (os dois ficam lado a lado para comparacao, mesmo
@@ -303,17 +424,22 @@ def calculo_sl(X: np.ndarray, Y: np.ndarray, IEN: np.ndarray, EToE: np.ndarray,
       *do proprio no de chegada*
       (`ccName`/`conditions`, mesma estrutura de
       `boundary.build_boundary_conditions`) quando definido para aquele
-      componente; senao mantem o valor atual do proprio no. Nos de
-      centroide nunca tem nome de contorno, entao sempre caem nesse
-      ultimo caso.
+      componente; senao mantem o valor atual do proprio no. Nos
+      extras: no MINI (centroide) nunca tem nome de contorno, entao
+      sempre caem no fallback do proprio no; no Tri6 o no de aresta
+      *pode* ter nome (se cair no contorno), mas so' quando
+      `bc_dirichlet` e' passado pronto -- o fallback interno
+      `_fallback_dirichlet` nao ve nos extras nomeados de jeito nenhum,
+      ver seu docstring.
     - `"intercept"` (padrao): tratamento do codigo de referencia do
       professor -- calcula onde a caracteristica de fato cruzou o contorno e
-      interpola o campo *atual* nos dois nos daquela aresta (ver
-      `_fallback_interceptacao`). Nao depende de o no de chegada ter
-      Dirichlet, entao trata corretamente saida por contorno que nao
-      prescreve velocidade (ex.: `outlet`, que so define `p`), onde o
-      modo `"dirichlet"` congela o no. So cai no fallback de Dirichlet
-      no residuo geometricamente degenerado (caracteristica paralela a
+      interpola o campo *atual* nos nos daquela aresta (ver
+      `_fallback_interceptacao`: 2 nos de vertice no MINI, +1 no de
+      aresta no Tri6). Nao depende de o no de chegada ter Dirichlet,
+      entao trata corretamente saida por contorno que nao prescreve
+      velocidade (ex.: `outlet`, que so define `p`), onde o modo
+      `"dirichlet"` congela o no. So cai no fallback de Dirichlet no
+      residuo geometricamente degenerado (caracteristica paralela a
       aresta) e nos que nao convergiram em `max_iter` (sem face de
       saida registrada).
 
@@ -335,16 +461,37 @@ def calculo_sl(X: np.ndarray, Y: np.ndarray, IEN: np.ndarray, EToE: np.ndarray,
     explicito do proprio backtrace, e evita uma interpolacao extra por
     passo.
 
-    Retorna (vx_star, vy_star), tamanho `npoints + ne`.
+    `bc_dirichlet`, se dado, e' a tupla `(vx_bc, has_vx_bc, vy_bc,
+    has_vy_bc)` ja resolvida por no -- e' o que `run_simulation.py`
+    passa, reaproveitando o que `boundary.build_boundary_conditions` ja
+    calculou. Sem ela, `ccName`/`conditions` sao reinterpretados aqui por
+    `_fallback_dirichlet`, que **nao enxerga a extensao geometrica dos
+    contornos** e por isso encolhe condicoes com perfil (ver
+    `boundary.valores_da_condicao`); esse caminho so serve para contorno
+    uniforme, onde os dois coincidem exatamente.
+
+    Retorna (vx_star, vy_star), mesmo tamanho de `vx`/`vy`.
     """
     if fora_dominio not in ("dirichlet", "intercept"):
         raise ValueError(f"fora_dominio desconhecido: {fora_dominio!r} (use 'dirichlet' ou 'intercept')")
+    if elemento not in ("mini", "tri6"):
+        raise ValueError(f"elemento desconhecido: {elemento!r} (use 'mini' ou 'tri6')")
+
+    if elem_start_extra is None:
+        if elemento == "tri6":
+            raise ValueError(
+                "elem_start_extra e' obrigatorio para elemento='tri6' -- o no de aresta nao tem "
+                "uma semente de elemento generica como o centroide do MINI (`np.arange(ne)` so' "
+                "vale quando o no extra `npoints + e` E' o centroide do elemento `e`). "
+                "Ver mesh.montar_edge_to_elem."
+            )
+        elem_start_extra = np.arange(ne)
 
     X_campo = X if X_campo is None else X_campo
     Y_campo = Y if Y_campo is None else Y_campo
 
-    n_total = npoints + ne
-    elem_start = np.concatenate([node_to_elem, np.arange(ne)])
+    n_total = len(vx)
+    elem_start = np.concatenate([node_to_elem, elem_start_extra])
 
     xd, yd = backtrace(X, Y, vx, vy, dt)
     elem, lambdas, saida = localizar_pontos_partida(
@@ -353,10 +500,15 @@ def calculo_sl(X: np.ndarray, Y: np.ndarray, IEN: np.ndarray, EToE: np.ndarray,
     vx_star, vy_star = np.copy(vx), np.copy(vy)  # default: mantem o proprio valor
 
     localizados = np.where(elem != -1)[0]
-    i, j, k, b = IEN[elem[localizados]].T
     li, lj, lk = lambdas[localizados].T
-    vx_star[localizados] = interpolar_mini(li, lj, lk, vx[i], vx[j], vx[k], vx[b])
-    vy_star[localizados] = interpolar_mini(li, lj, lk, vy[i], vy[j], vy[k], vy[b])
+    if elemento == "tri6":
+        i, j, k, eij, ejk, eki = IEN[elem[localizados]].T
+        vx_star[localizados] = interpolar_tri6(li, lj, lk, vx[i], vx[j], vx[k], vx[eij], vx[ejk], vx[eki])
+        vy_star[localizados] = interpolar_tri6(li, lj, lk, vy[i], vy[j], vy[k], vy[eij], vy[ejk], vy[eki])
+    else:
+        i, j, k, b = IEN[elem[localizados]].T
+        vx_star[localizados] = interpolar_mini(li, lj, lk, vx[i], vx[j], vx[k], vx[b])
+        vy_star[localizados] = interpolar_mini(li, lj, lk, vy[i], vy[j], vy[k], vy[b])
 
     exited = elem == -1
     restantes = exited  # quem ainda precisa do fallback de Dirichlet
@@ -364,12 +516,16 @@ def calculo_sl(X: np.ndarray, Y: np.ndarray, IEN: np.ndarray, EToE: np.ndarray,
     if fora_dominio == "intercept":
         idx, vx_int, vy_int = _fallback_interceptacao(
             X_campo, Y_campo, IEN, xd, yd, saida, exited & (saida[:, 0] != -1), vx, vy,
-            X_no=X, Y_no=Y)
+            X_no=X, Y_no=Y, elemento=elemento)
         vx_star[idx], vy_star[idx] = vx_int, vy_int
         restantes = restantes.copy()
         restantes[idx] = False
 
-    vx_bc, has_vx_bc, vy_bc, has_vy_bc = _fallback_dirichlet(ccName, conditions, npoints, n_total)
+    if bc_dirichlet is not None:
+        vx_bc, has_vx_bc, vy_bc, has_vy_bc = bc_dirichlet
+    else:
+        vx_bc, has_vx_bc, vy_bc, has_vy_bc = _fallback_dirichlet(
+            ccName, conditions, npoints, n_total, X_campo, Y_campo)
     usa_bc_x = restantes & has_vx_bc
     usa_bc_y = restantes & has_vy_bc
     vx_star[usa_bc_x] = vx_bc[usa_bc_x]

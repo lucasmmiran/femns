@@ -5,7 +5,7 @@ from femns.report import COLUNAS, salvar_resumo
 
 def test_salvar_resumo_cria_arquivo_com_cabecalho(tmp_path):
     path = tmp_path / "benchmarks.xlsx"
-    salvar_resumo(path, {"mesh": "meshes/poiseuille.msh", "advection": "explicit", "dt": 0.001})
+    salvar_resumo(path, {"mesh": "meshes/poiseuille.msh", "advection": "eulerian", "dt": 0.001})
 
     wb = load_workbook(path)
     ws = wb.active
@@ -16,7 +16,7 @@ def test_salvar_resumo_cria_arquivo_com_cabecalho(tmp_path):
 
     linha = dict(zip(COLUNAS, linhas[1]))
     assert linha["mesh"] == "meshes/poiseuille.msh"
-    assert linha["advection"] == "explicit"
+    assert linha["advection"] == "eulerian"
     assert linha["dt"] == 0.001
 
 
@@ -46,9 +46,9 @@ def test_salvar_resumo_chave_extra_e_ignorada(tmp_path):
 
 def test_salvar_resumo_acumula_uma_linha_por_chamada(tmp_path):
     path = tmp_path / "benchmarks.xlsx"
-    salvar_resumo(path, {"mesh": "a", "advection": "explicit"})
+    salvar_resumo(path, {"mesh": "a", "advection": "eulerian"})
     salvar_resumo(path, {"mesh": "a", "advection": "semi_lagrangian"})
-    salvar_resumo(path, {"mesh": "b", "advection": "explicit"})
+    salvar_resumo(path, {"mesh": "b", "advection": "eulerian"})
 
     wb = load_workbook(path)
     ws = wb.active
@@ -56,7 +56,7 @@ def test_salvar_resumo_acumula_uma_linha_por_chamada(tmp_path):
 
     assert len(linhas) == 3
     advections = [dict(zip(COLUNAS, linha))["advection"] for linha in linhas]
-    assert advections == ["explicit", "semi_lagrangian", "explicit"]
+    assert advections == ["eulerian", "semi_lagrangian", "eulerian"]
 
 
 def test_salvar_resumo_cria_diretorio_pai_se_nao_existir(tmp_path):
@@ -82,7 +82,7 @@ def test_salvar_resumo_migra_arquivo_com_cabecalho_antigo(tmp_path):
     cabecalho_antigo = [c for c in COLUNAS if c not in novas]
     valores_antigos = {
         "timestamp": "2026-01-01T00:00:00", "mesh": "meshes/poiseuille.msh",
-        "advection": "explicit", "dt": 0.001, "reynolds": 1, "iterations": 1000,
+        "advection": "eulerian", "dt": 0.001, "reynolds": 1, "iterations": 1000,
     }
     wb = Workbook()
     ws = wb.active
@@ -91,7 +91,7 @@ def test_salvar_resumo_migra_arquivo_com_cabecalho_antigo(tmp_path):
     ws.append([valores_antigos.get(c) for c in cabecalho_antigo])
     wb.save(path)
 
-    salvar_resumo(path, {"mesh": "meshes/degrau.msh", "advection": "explicit", "element": "tri6"})
+    salvar_resumo(path, {"mesh": "meshes/degrau.msh", "advection": "eulerian", "element": "tri6"})
 
     wb2 = load_workbook(path)
     ws2 = wb2.active

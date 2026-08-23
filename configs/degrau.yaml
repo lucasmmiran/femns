@@ -6,7 +6,7 @@ simulation:
   dt: 0.01
   iterations: 1000
   reynolds: 1
-  advection: explicit  # explicit (padrao, hoje) ou semi_lagrangian
+  advection: eulerian  # eulerian (padrao) ou semi_lagrangian
 
 boundary:
   # Ordem de prioridade dos contornos, da mais baixa para a mais alta.

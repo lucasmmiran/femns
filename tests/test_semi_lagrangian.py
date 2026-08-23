@@ -1,12 +1,13 @@
 import numpy as np
 
-from femns.mesh import elem_mini, montar_EToE, montar_node_to_elem
+from femns.mesh import elem_mini, elem_tri6, montar_edge_to_elem, montar_EToE, montar_node_to_elem
 from femns.semi_lagrangian import (
     backtrace,
     baricentro,
     calculo_sl,
     interceptar_contorno,
     interpolar_mini,
+    interpolar_tri6,
     localizar_pontos_partida,
     locate_point,
 )
@@ -202,6 +203,48 @@ def test_interpolar_mini_clampa_lambda_negativo():
     assert np.isclose(v_star, 1.0)
 
 
+def test_interpolar_tri6_reproduz_quadratico_arbitrario():
+    """A base P2 do Tri6 tem que reproduzir EXATAMENTE (precisao de
+    maquina) um polinomio quadratico arbitrario -- e' a mesma logica da
+    licao de 2026-07-12 (CLAUDE.local.md): um teste com valores
+    escolhidos a mao pode "passar" com uma base errada se coincidir por
+    acidente (foi o caso do bug da bolha do MINI, com bolha=0). Um
+    polinomio com coeficientes aleatorios e triangulo nao-equilatero nao
+    deixa esse espaco de coincidencia -- uma base P2 errada (ex.: usar
+    so os 3 vertices, sem os nos de aresta) nao passaria aqui.
+    """
+    rng = np.random.default_rng(42)
+    X0 = np.array([0.0, 1.0, 0.3])  # triangulo arbitrario, nao alinhado com os eixos
+    Y0 = np.array([0.0, 0.2, 1.1])
+
+    a, b, c, d, e, f = rng.uniform(-3.0, 3.0, size=6)
+
+    def poly(x, y):
+        return a + b * x + c * y + d * x**2 + e * x * y + f * y**2
+
+    vi, vj, vk = poly(X0[0], Y0[0]), poly(X0[1], Y0[1]), poly(X0[2], Y0[2])
+    xij, yij = (X0[0] + X0[1]) / 2, (Y0[0] + Y0[1]) / 2
+    xjk, yjk = (X0[1] + X0[2]) / 2, (Y0[1] + Y0[2]) / 2
+    xki, yki = (X0[2] + X0[0]) / 2, (Y0[2] + Y0[0]) / 2
+    vij, vjk, vki = poly(xij, yij), poly(xjk, yjk), poly(xki, yki)
+
+    li, lj, lk = rng.uniform(0.05, 0.9, size=3)
+    soma = li + lj + lk
+    li, lj, lk = li / soma, lj / soma, lk / soma
+    x_teste = li * X0[0] + lj * X0[1] + lk * X0[2]
+    y_teste = li * Y0[0] + lj * Y0[1] + lk * Y0[2]
+
+    obtido = interpolar_tri6(li, lj, lk, vi, vj, vk, vij, vjk, vki)
+    assert np.isclose(obtido, poly(x_teste, y_teste), atol=1e-12)
+
+
+def test_interpolar_tri6_vertices_e_nos_de_aresta():
+    # No vertice i (li=1): so Ni e' nao-nulo (Ni=1*(2*1-1)=1).
+    assert np.isclose(interpolar_tri6(1.0, 0.0, 0.0, vi=5.0, vj=1.0, vk=1.0, vij=1.0, vjk=1.0, vki=1.0), 5.0)
+    # No no de aresta (i,j) (li=lj=0.5, lk=0): Nij=4*0.5*0.5=1, resto 0.
+    assert np.isclose(interpolar_tri6(0.5, 0.5, 0.0, vi=1.0, vj=1.0, vk=1.0, vij=7.0, vjk=1.0, vki=1.0), 7.0)
+
+
 def test_backtrace_euler_translacao():
     X, Y, IEN = quadrado_dois_triangulos()
     vx_node = np.full_like(X, 2.0)
@@ -360,6 +403,122 @@ def test_calculo_sl_intercept_reproduz_campo_linear_na_saida():
                              vx, vy, dt=0.5, npoints=npoints, ne=ne, fora_dominio="intercept")
 
     assert np.isclose(vx_star[4], 4.0 / 9.0)
+
+
+def _malha_tri6_quadrado():
+    """Quadrado unitario dividido em 2 triangulos, ja estendido pro Tri6
+    (nos de aresta deduplicados). Retorna tambem os elementos que
+    `calculo_sl` precisa para o elemento='tri6' (EToE, node_to_elem,
+    elem_start_extra) e o dict `edge_para_no` para os testes acharem os
+    nos de aresta que precisam pelo nome (vertices que a aresta liga)."""
+    X0, Y0, IEN0 = quadrado_dois_triangulos()
+    npoints = 4
+    IEN, X, Y, edge_para_no = elem_tri6(IEN0, X0, Y0)
+    EToE, _ = montar_EToE(IEN0)
+    node_to_elem = montar_node_to_elem(IEN0, npoints)
+    elem_start_extra = montar_edge_to_elem(IEN, npoints, len(edge_para_no))
+    return X, Y, IEN, EToE, node_to_elem, elem_start_extra, edge_para_no, npoints
+
+
+def test_calculo_sl_tri6_reproduz_campo_quadratico_interior():
+    """Igual em espirito a `test_interpolar_tri6_reproduz_quadratico_arbitrario`,
+    mas passando pelo pipeline inteiro de `calculo_sl` (backtrace +
+    localizacao + dispatch pra `interpolar_tri6`) -- cobre o
+    desempacotamento `i, j, k, eij, ejk, eki = IEN[elem].T` especifico
+    do Tri6 dentro de `calculo_sl`, que o teste unitario de
+    `interpolar_tri6` sozinho nao exercita. O MINI nao reproduziria um
+    campo quadratico geral (so e' exato para linear); aqui, com o campo
+    definido por um polinomio quadratico em todo DOF nodal, o Tri6 tem
+    que recuperar o valor exato do polinomio no pe da caracteristica
+    (que fica dentro do proprio elemento, dt pequeno).
+    """
+    X, Y, IEN, EToE, node_to_elem, elem_start_extra, edge_para_no, npoints = _malha_tri6_quadrado()
+
+    rng = np.random.default_rng(7)
+    a1, b1, c1, d1, e1, f1 = rng.uniform(-1.0, 1.0, size=6)
+    a2, b2, c2, d2, e2, f2 = rng.uniform(-1.0, 1.0, size=6)
+
+    def poly1(x, y):
+        return a1 + b1 * x + c1 * y + d1 * x**2 + e1 * x * y + f1 * y**2
+
+    def poly2(x, y):
+        return a2 + b2 * x + c2 * y + d2 * x**2 + e2 * x * y + f2 * y**2
+
+    vx, vy = poly1(X, Y), poly2(X, Y)
+
+    no = edge_para_no[(0, 2)]  # no da diagonal -- interior ao quadrado, nao no contorno externo
+    dt = 0.05
+    xd, yd = X[no] - dt * vx[no], Y[no] - dt * vy[no]
+
+    vx_star, vy_star = calculo_sl(
+        X, Y, IEN, EToE, node_to_elem, [None] * npoints, {}, vx, vy, dt, npoints, ne=2,
+        elemento="tri6", elem_start_extra=elem_start_extra)
+
+    assert np.isclose(vx_star[no], poly1(xd, yd))
+    assert np.isclose(vy_star[no], poly2(xd, yd))
+
+
+def test_calculo_sl_tri6_intercept_reproduz_campo_quadratico_na_saida():
+    """Analogo Tri6 de `test_calculo_sl_intercept_reproduz_campo_linear_na_saida`,
+    mas discriminante: usa um campo genuinamente quadratico ao longo da
+    aresta de saida (nao um que colapsa em linear), pra provar que a
+    restricao quadratica de `_fallback_interceptacao` (decisao A,
+    docs/semi_lagrangian_tri6.md) e' de fato usada -- se o codigo
+    caisse de volta pra interpolacao linear so nos 2 vertices (o
+    tratamento do MINI), o valor bateria com uma reta entre `vx[0]` e
+    `vx[1]`, nao com o polinomio real no ponto de cruzamento.
+
+    Fundo do quadrado (y=0, nos 0, 1 e o no de aresta (0,1)) recebe
+    `h(x) = 2 - 3x + 5x^2`. O no da diagonal (0,2), em (0.5, 0.5), e'
+    empurrado com `vx=0.3, vy=1.0` e `dt=0.8`: backtrace cai em
+    (0.26, -0.3), fora do dominio, cruzando a aresta de baixo (reta
+    vertical partindo de x=0.5 na direcao (0.3,1.0)) em x=0.35 -- logo
+    o valor esperado e' `h(0.35)`.
+    """
+    X, Y, IEN, EToE, node_to_elem, elem_start_extra, edge_para_no, npoints = _malha_tri6_quadrado()
+
+    def h(x):
+        return 2.0 - 3.0 * x + 5.0 * x**2
+
+    no4 = edge_para_no[(0, 1)]
+    no6 = edge_para_no[(0, 2)]
+
+    vx = np.zeros(9)
+    vy = np.zeros(9)
+    vx[0], vx[1], vx[no4] = h(0.0), h(1.0), h(0.5)
+    vx[no6], vy[no6] = 0.3, 1.0
+    dt = 0.8
+
+    vx_star, _ = calculo_sl(
+        X, Y, IEN, EToE, node_to_elem, [None] * npoints, {}, vx, vy, dt, npoints, ne=2,
+        elemento="tri6", elem_start_extra=elem_start_extra, fora_dominio="intercept")
+
+    assert np.isclose(vx_star[no6], h(0.35))
+
+    # modo dirichlet, sem nenhuma condicao no dict: sem valor prescrito
+    # pra cair, mantem o proprio no (mesma diferenca de comportamento
+    # que o teste MINI equivalente demonstra).
+    vx_dir, _ = calculo_sl(
+        X, Y, IEN, EToE, node_to_elem, [None] * npoints, {}, vx, vy, dt, npoints, ne=2,
+        elemento="tri6", elem_start_extra=elem_start_extra, fora_dominio="dirichlet")
+
+    assert np.isclose(vx_dir[no6], 0.3)
+
+
+def test_calculo_sl_tri6_requer_elem_start_extra():
+    """O no de aresta do Tri6 nao tem uma semente generica por indice
+    como o centroide do MINI (`np.arange(ne)`) -- omitir
+    `elem_start_extra` para `elemento='tri6'` tem que falhar cedo e com
+    mensagem clara, nao silenciosamente usar uma semente errada."""
+    X, Y, IEN, EToE, node_to_elem, _, _, npoints = _malha_tri6_quadrado()
+
+    try:
+        calculo_sl(X, Y, IEN, EToE, node_to_elem, [None] * npoints, {},
+                   np.zeros(9), np.zeros(9), 0.1, npoints, ne=2, elemento="tri6")
+    except ValueError as e:
+        assert "elem_start_extra" in str(e)
+    else:
+        raise AssertionError("deveria ter levantado ValueError")
 
 
 def test_calculo_sl_fora_dominio_invalido():

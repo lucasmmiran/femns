@@ -6,7 +6,7 @@ simulation:
   dt: 0.01
   iterations: 1000
   reynolds: 1
-  advection: semi_lagrangian  # explicit (Euleriano) ou semi_lagrangian
+  advection: semi_lagrangian  # eulerian (padrao) ou semi_lagrangian
   sl_boundary: intercept  # dirichlet (padrao) ou intercept (interceptacao da aresta de saida)
 
 boundary:

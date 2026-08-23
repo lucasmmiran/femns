@@ -25,12 +25,15 @@ velocidade — vértices + nó de aresta —, P1 para pressão).
 │   ├── moving_mesh.py        # deslocamento senoidal de um nó (experimento de malha móvel)
 │   ├── solver.py             # montagem do sistema global e passo de tempo (Euler implícito)
 │   ├── io.py                 # escrita dos resultados em VTK
-│   └── plotting.py           # imagens (PNG) da distribuição espacial das variáveis
+│   ├── plotting.py           # imagens (PNG) da distribuição espacial das variáveis
+│   └── webui/                # GUI web opcional (ver seção "Interface web") -- não usado pelo solver
 ├── scripts/
 │   ├── run_simulation.py    # CLI: orquestra mesh → assembly → boundary → solver → io
+│   ├── run_gui.py           # CLI: sobe a interface web opcional (ver seção "Interface web")
 │   └── plot_solution.py     # CLI: gera as imagens da última solução de uma simulação
 ├── tests/                    # testes unitários (conectividade, valores analíticos dos elementos MINI/Tri6, contornos)
 ├── solucoes/                  # saída dos .vtk (gerada em runtime, ignorada pelo git)
+├── femns-gui                  # executável: wrapper de shell pra scripts/run_gui.py (ver "Interface web")
 └── pyproject.toml
 ```
 
@@ -105,9 +108,9 @@ simulation:
   dt: 0.001
   iterations: 1000
   reynolds: 1
-  advection: explicit  # explicit (padrao) ou semi_lagrangian
+  advection: eulerian  # eulerian (padrao) ou semi_lagrangian
   sl_boundary: intercept  # intercept (padrao) ou dirichlet -- so vale com semi_lagrangian
-  element: mini  # mini (padrao) ou tri6 -- semi_lagrangian ainda so suporta mini
+  element: mini  # mini (padrao) ou tri6
 
 boundary:
   priority: [outlet, inlet, top, bottom]   # do menor para o maior prioridade
@@ -136,6 +139,32 @@ benchmark_xlsx: solucoes/benchmarks.xlsx
   (`vx`, `vy`, `p`) que são condição de Dirichlet ali. Um componente
   ausente fica livre (natural) naquele contorno — é assim que o outlet
   fica livre em velocidade e as paredes/entrada ficam livres em pressão.
+
+  Cada valor pode ser um número (condição uniforme) ou um **perfil**:
+
+  ```yaml
+  inlet: {vx: {perfil: parabolico, vmax: 1.5}, vy: 0.0}
+  ```
+
+  `parabolico` dá `v(s) = 4·vmax·(s−s₀)(s₁−s)/(s₁−s₀)²` — zero nas pontas
+  do contorno, `vmax` no meio. As pontas `s₀`, `s₁` saem da **extensão
+  geométrica** do contorno (todos os nós dos segmentos com aquele nome),
+  então o mesmo config vale para qualquer altura de canal; o eixo (`x` ou
+  `y`) é detectado pela direção em que o contorno se estende. Como a média
+  de uma parábola é 2/3 do pico, `vmax: 1.5` tem a mesma vazão de
+  `vx: 1.0` uniforme.
+
+  A distinção "extensão geométrica" vs "nós que recebem o valor" não é
+  detalhe: as quinas da entrada pertencem à parede por `priority`
+  (no-slip, correto), então saem do conjunto que recebe o perfil. Ancorar
+  a parábola nos nós restantes a encolhe de `h` em cada ponta — a vazão
+  cai ~2h/H (6,4% numa malha com h≈0,03) **com a vazão ainda conservada
+  seção a seção**, o que faz o erro parecer discretização.
+
+  Impor o perfil desenvolvido na entrada é o que torna o Poiseuille um
+  caso de **validação exata**: a solução analítica `6y(1−y)` passa a
+  valer no canal inteiro, sem região de desenvolvimento (ver
+  `scripts/plot_poiseuille_validacao.py`).
 - **`moving_point`**: experimento de malha móvel/ALE — desloca **um** nó
   (`node_index`) em órbita circular a cada iteração, reinterpolando a
   velocidade dele a partir dos vizinhos (IDW). Defina `enabled: false`
@@ -174,7 +203,7 @@ benchmark_xlsx: solucoes/benchmarks.xlsx
   transporta é o quanto o fluido anda *em relação à malha*. A correção
   tem forma diferente em cada caminho de advecção:
 
-  - `advection: explicit` — a velocidade convectiva vira `v − w`, com `w`
+  - `advection: eulerian` — a velocidade convectiva vira `v − w`, com `w`
     a velocidade da malha (`moving_mesh.velocidade_malha`, derivada
     **analítica** da oscilação, não diferença finita). Com `w = 0` recai
     exatamente no caso Euleriano.
@@ -197,7 +226,7 @@ benchmark_xlsx: solucoes/benchmarks.xlsx
   Com `amplitude_factor: 0.3` no degrau não houve inversão, mas a área
   mínima caiu ~4× — `0.3` não é uma garantia formal, é um valor medido
   nesta malha.
-- **`simulation.advection`**: `explicit` (padrão) trata a advecção de
+- **`simulation.advection`**: `eulerian` (padrão) trata a advecção de
   forma explícita, linearizada na velocidade do passo anterior —
   restrita a uma condição de estabilidade tipo CFL no `dt`.
   `semi_lagrangian` usa backtrace + interpolação no pé da
@@ -246,6 +275,68 @@ elementos MINI e Tri6 contra valores analíticos (calculados à mão e/ou
 verificados por integração simbólica exata com `sympy`) para um
 triângulo de referência, e resolução de prioridade/condições de
 contorno — nenhum depende de arquivo `.msh` nem de GPU.
+
+## Interface web (GUI opcional)
+
+```bash
+./femns-gui                          # abre o navegador em http://127.0.0.1:8765/
+./femns-gui --port 9000 --no-browser
+```
+
+`femns-gui` (executável na raiz do projeto) é um wrapper de shell fino em
+volta de `scripts/run_gui.py`: acha o Python certo (`.venv/` ao lado dele
+por padrão, `FEMNS_VENV=/caminho/para/outro/.venv ./femns-gui` pra apontar
+pra outro) e falha com uma mensagem clara se o pacote `femns` não estiver
+instalado nele, em vez do traceback de `ModuleNotFoundError`. Equivalente
+a rodar direto:
+
+```bash
+python scripts/run_gui.py --port 9000 --no-browser
+```
+
+Módulo à parte (`src/femns/webui/`), não importado por nenhum módulo do
+solver nem por `run_simulation.py` — a GUI é só mais um cliente do
+pacote `femns`, e o CLI continua funcionando sem ela instalada/rodando.
+Sem dependências novas: o servidor é só biblioteca padrão do Python
+(`http.server`), servindo um frontend estático (HTML/CSS/JS puro, sem
+build step) em `src/femns/webui/static/`.
+
+Duas telas:
+
+- **Nova simulação**: escolhe a malha (lê os nomes de contorno reais do
+  `.msh`, físical groups do Gmsh, via `femns.webui.meshes`), preenche
+  `dt`/`iterations`/`reynolds`/`advection`/`element`/`sl_boundary`,
+  monta `boundary.priority`/`boundary.conditions` num editor (reordenar
+  prioridade, marcar `vx`/`vy`/`p` por contorno) — com um seletor de
+  template que pré-preenche tudo a partir de um `configs/*.yaml`
+  existente. "Salvar configuração" grava o formulário inteiro (nome
+  escolhido na hora) em `configs/gui_saved/` via `femns.webui.saved_configs`
+  (git-ignorado, local do usuário — distinto dos templates curados em
+  `configs/*.yaml`); o seletor "Configuração salva" ao lado recarrega
+  qualquer uma de volta no formulário (inclusive `moving_point`/
+  `mesh_motion`), com botão de excluir. Salvar não valida nada (dá pra
+  guardar um rascunho incompleto); só "Rodar simulação" valida de fato.
+  "Rodar simulação" grava um config novo em `configs/gui/` e lança
+  `scripts/run_simulation.py` como subprocesso
+  (`femns.webui.jobs`); a tela acompanha progresso (contagem de
+  `solucao -N.vtk` escritos) e log em tempo real, com botão de cancelar.
+  Saída em `solucoes/gui/<rótulo>-<timestamp>/` (git-ignorado, mesmo
+  tratamento do resto de `solucoes/`). O editor de condição de contorno
+  só cobre valores numéricos uniformes — condição com perfil (ex.
+  `{perfil: parabolico, vmax: ...}`, ver `boundary.valores_da_condicao`)
+  ainda não tem campo próprio; carregar um template que use perfil deixa
+  aquele componente sem marcar em vez de mostrar o valor errado.
+- **Resultados**: lista qualquer diretório sob `solucoes/` que tenha
+  `solucao -N.vtk` (runs da GUI ou do CLI direto), carrega os quadros
+  sob demanda (`femns.webui.results`, um `.vtk` por requisição, não tudo
+  de uma vez) e desenha o campo escolhido (`vx`, `vy`, `p` ou `|v|`)
+  num canvas 2D (colormap `jet`, sombreamento plano por triângulo).
+  Play/pause, passo a passo, slider de quadro, toggle de malha.
+
+Todo endpoint que recebe path do cliente (malha, run de resultado)
+valida contra uma lista construída no servidor — o cliente nunca manda
+um path de arquivo direto, só nomes/ids opacos (ver `jobs.validate_config`
+e o índice `run_id → dir` em `server.py`).
 
 ## Lint
 

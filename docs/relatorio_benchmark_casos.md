@@ -2,10 +2,10 @@
 
 Comparação dos 3 casos de validação rodados (Poiseuille, degrau/backward-facing
 step e cavidade lid-driven), cada um nas duas formulações de advecção
-disponíveis (`simulation.advection: explicit` e `semi_lagrangian`), com dados
+disponíveis (`simulation.advection: eulerian` e `semi_lagrangian`), com dados
 extraídos de `solucoes/benchmarks.xlsx` (ver `docs/benchmark.md` para o
 significado de cada coluna) e imagens de `docs/imagens/`. Em cada dupla, o
-`explicit` e o `semi_lagrangian` usaram a mesma malha, `dt`, `Re` e número de
+`eulerian` e o `semi_lagrangian` usaram a mesma malha, `dt`, `Re` e número de
 iterações — só o termo advectivo muda.
 
 Não são avaliadas aqui as métricas de convergência do BiCGSTAB
@@ -18,7 +18,7 @@ Não são avaliadas aqui as métricas de convergência do BiCGSTAB
 **Malha** (`meshes/poiseuille.msh`): 2785 nós, 5376 elementos.
 **Config**: `dt = 0.001`, `Re = 1`, 1000 iterações, `device = cuda`.
 
-| Métrica | `explicit` | `semi_lagrangian` |
+| Métrica | `eulerian` | `semi_lagrangian` |
 |---|---|---|
 | Tempo total (s) | 47.830 | 38.664 |
 | Tempo médio/iter (s) | 0.04687 | 0.03773 |
@@ -33,13 +33,13 @@ Não são avaliadas aqui as métricas de convergência do BiCGSTAB
 
 ### Perfil (p, vx, vy) ao longo da linha de saída
 
-| `explicit` | `semi_lagrangian` |
+| `eulerian` | `semi_lagrangian` |
 |---|---|
 | ![Poiseuille explícito — perfil](imagens/Poiseuille_explicito_gráfico.png) | ![Poiseuille SL — perfil](imagens/Poiseuille_SL_gráfico.png) |
 
 ### Campos 2D
 
-| Campo | `explicit` | `semi_lagrangian` |
+| Campo | `eulerian` | `semi_lagrangian` |
 |---|---|---|
 | `vx` | ![vx poiseuille explícito](imagens/vx_poiseuille_explicito.png) | ![vx poiseuille SL](imagens/vx_poiseuille_SL.png) |
 | `vy` | ![vy poiseuille explícito](imagens/vy_poiseuille_explicito.png) | ![vy poiseuille SL](imagens/vy_poiseuille_SL.png) |
@@ -52,7 +52,7 @@ Não são avaliadas aqui as métricas de convergência do BiCGSTAB
 **Malha** (`meshes/degrau.msh`): 4497 nós, 8704 elementos.
 **Config**: `dt = 0.01`, `Re = 1`, 1000 iterações, `device = cuda`.
 
-| Métrica | `explicit` | `semi_lagrangian` |
+| Métrica | `eulerian` | `semi_lagrangian` |
 |---|---|---|
 | Tempo total (s) | 78.875 | 49.895 |
 | Tempo médio/iter (s) | 0.07799 | 0.04896 |
@@ -67,13 +67,13 @@ Não são avaliadas aqui as métricas de convergência do BiCGSTAB
 
 ### Perfil (p, vx, vy) ao longo da linha de saída
 
-| `explicit` | `semi_lagrangian` |
+| `eulerian` | `semi_lagrangian` |
 |---|---|
 | ![Degrau explícito — perfil](imagens/Degrau_explicito_gráfico.png) | ![Degrau SL — perfil](imagens/Degrau_SL_gráfico.png) |
 
 ### Campos 2D
 
-| Campo | `explicit` | `semi_lagrangian` |
+| Campo | `eulerian` | `semi_lagrangian` |
 |---|---|---|
 | `vx` | ![vx degrau explícito](imagens/vx_degrau_explicito.png) | ![vx degrau SL](imagens/vx_degrau_SL.png) |
 | `vy` | ![vy degrau explícito](imagens/vy_degrau_explicito.png) | ![vy degrau SL](imagens/vy_degrau_SL.png) |
@@ -86,7 +86,7 @@ Não são avaliadas aqui as métricas de convergência do BiCGSTAB
 **Malha** (`meshes/lid.msh`): 8321 nós, 16384 elementos.
 **Config**: `dt = 0.01`, `Re = 1`, 1000 iterações, `device = cuda`.
 
-| Métrica | `explicit` | `semi_lagrangian` |
+| Métrica | `eulerian` | `semi_lagrangian` |
 |---|---|---|
 | Tempo total (s) | 136.483 | 33.632 |
 | Tempo médio/iter (s) | 0.1319 | 0.03258 |
@@ -101,13 +101,13 @@ Não são avaliadas aqui as métricas de convergência do BiCGSTAB
 
 ### Perfil (p, vx, vy) ao longo da linha central
 
-| `explicit` | `semi_lagrangian` |
+| `eulerian` | `semi_lagrangian` |
 |---|---|
 | ![Lid-driven explícito — perfil](imagens/lid-driven_explicito_gráfico.png) | ![Lid-driven SL — perfil](imagens/lid-driven_SL_gráfico.png) |
 
 ### Campos 2D
 
-| Campo | `explicit` | `semi_lagrangian` |
+| Campo | `eulerian` | `semi_lagrangian` |
 |---|---|---|
 | `vx` | ![vx lid-driven explícito](imagens/vx_lid-driven_explicito.png) | ![vx lid-driven SL](imagens/vx_lid-driven_SL.png) |
 | `vy` | ![vy lid-driven explícito](imagens/vy_lid-driven_explicito.png) | ![vy lid-driven SL](imagens/vy_lid-driven_SL.png) |

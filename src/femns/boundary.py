@@ -39,12 +39,87 @@ def assign_boundary_names(IENbound: np.ndarray, IENboundElem: list, npoints: int
     return ccName
 
 
+def perfil_parabolico(coord: np.ndarray, vmax: float,
+                       s0: float = None, s1: float = None) -> np.ndarray:
+    """Perfil parabolico sobre um contorno: zero em `s0`/`s1`, `vmax` no meio.
+
+        v(s) = 4 * vmax * (s - s0) * (s1 - s) / (s1 - s0)^2
+
+    `coord` sao as coordenadas dos nos que recebem o valor, ao longo do
+    eixo em que o contorno se estende. `s0`/`s1` sao as **pontas do
+    contorno** (default: min/max de `coord`); vem da malha e nao de uma
+    altura fixa no codigo, entao o mesmo config vale para qualquer canal.
+    Passe-as explicitamente quando `coord` nao cobrir o contorno inteiro
+    -- ver `valores_da_condicao`, onde as quinas ficam de fora por
+    prioridade de contorno.
+
+    E' o perfil desenvolvido de Poiseuille: com `vmax = 1.5` a velocidade
+    media na secao e' 1, mesma vazao da entrada uniforme `vx: 1.0`, o que
+    permite comparar as duas condicoes sem mudar a vazao.
+    """
+    s0 = coord.min() if s0 is None else s0
+    s1 = coord.max() if s1 is None else s1
+    if s1 == s0:
+        raise ValueError("perfil parabolico num contorno degenerado (todos os nos na mesma posicao)")
+    return 4.0 * vmax * (coord - s0) * (s1 - coord) / (s1 - s0) ** 2
+
+
+def valores_da_condicao(valor, idx: np.ndarray, X: np.ndarray, Y: np.ndarray,
+                         idx_span: np.ndarray = None):
+    """Resolve o valor de uma condicao de contorno nos nos `idx`.
+
+    Aceita um numero (condicao uniforme, o caso historico) ou um dict
+    descrevendo um perfil, hoje so `{"perfil": "parabolico", "vmax": v}`.
+
+    `idx_span` (default: `idx`) sao os nos que definem a **extensao**
+    do contorno, e nao precisam ser os mesmos que recebem o valor. A
+    distincao importa: `idx` ja passou pela resolucao de prioridade
+    (`assign_boundary_names`), entao as quinas do contorno normalmente
+    pertencem a parede e **saem** de `idx`. Calcular a extensao so com
+    `idx` encolhe o perfil de `h` em cada ponta -- a parabola zera dentro
+    do canal em vez de na parede, e a vazao sai baixa por ~2h/H (medido:
+    6,4% de erro numa malha com h~0.03, com a vazao ainda conservada de
+    secao a secao, o que faz o erro parecer discretizacao). Passe aqui os
+    nos *geometricos* do contorno.
+
+    O eixo do perfil e' detectado pela geometria do proprio contorno: usa
+    a coordenada em que os nos daquele contorno mais se espalham (y para
+    uma entrada vertical, x para uma horizontal). Evita ter que declarar o
+    eixo no config e errar silenciosamente.
+    """
+    if not isinstance(valor, dict):
+        return float(valor)
+
+    if X is None or Y is None:
+        raise ValueError(
+            "condicao de contorno com perfil exige as coordenadas da malha -- "
+            "passe X e Y para build_boundary_conditions")
+
+    nome = valor.get("perfil")
+    if nome != "parabolico":
+        raise ValueError(f"perfil de contorno desconhecido: {nome!r} (use 'parabolico')")
+
+    idx_span = idx if idx_span is None else idx_span
+    xs, ys = X[idx_span], Y[idx_span]
+    usa_y = (ys.max() - ys.min()) >= (xs.max() - xs.min())
+
+    coord = Y[idx] if usa_y else X[idx]
+    s0, s1 = (ys.min(), ys.max()) if usa_y else (xs.min(), xs.max())
+
+    return perfil_parabolico(coord, float(valor["vmax"]), s0=s0, s1=s1)
+
+
 def build_boundary_conditions(IENbound: np.ndarray, ccName: list, conditions: dict, npoints: int, device,
-                               IENpoint: np.ndarray = None, nnodes: int = None):
+                               IENpoint: np.ndarray = None, nnodes: int = None,
+                               X: np.ndarray = None, Y: np.ndarray = None,
+                               IENboundElem: list = None):
     """Monta os vetores de condicao de contorno (valores e indices) a partir do config.
 
     `conditions` mapeia nome do contorno -> {"vx": v, "vy": v, "p": v}; um
     componente so e restringido (Dirichlet) nos contornos que o listam.
+    Cada valor pode ser um numero (condicao uniforme) ou um dict de perfil
+    (ex. `{"perfil": "parabolico", "vmax": 1.5}`, ver
+    `valores_da_condicao`) -- perfis exigem `X`, `Y` (coordenadas dos nos).
     `IENpoint` (opcional) acrescenta nos marcados por contorno de ponto
     unico (ver `assign_boundary_names`) ao conjunto de nos considerado.
     `nnodes` (opcional, default `npoints`) e o total de nos de velocidade
@@ -66,19 +141,32 @@ def build_boundary_conditions(IENbound: np.ndarray, ccName: list, conditions: di
 
     vx_idx, vy_idx, p_idx = [], [], []
 
+    elem_arr = np.array(IENboundElem) if IENboundElem is not None else None
+
     for nome, valores in conditions.items():
         idx = cc[ccName_arr[cc] == nome]
+        if idx.size == 0:
+            continue
+
+        # Extensao geometrica do contorno (todos os nos dos segmentos com esse
+        # nome, quinas incluidas), que pode ser maior que `idx` -- ver
+        # `valores_da_condicao` sobre por que a diferenca importa nos perfis.
+        span = np.unique(IENbound[elem_arr == nome]) if elem_arr is not None else idx
+
         if "vx" in valores:
-            vx_cc[idx] = valores["vx"]
+            vx_cc[idx] = torch.as_tensor(
+                valores_da_condicao(valores["vx"], idx, X, Y, span), dtype=vx_cc.dtype, device=device)
             vx_idx.append(idx)
         if "vy" in valores:
-            vy_cc[idx] = valores["vy"]
+            vy_cc[idx] = torch.as_tensor(
+                valores_da_condicao(valores["vy"], idx, X, Y, span), dtype=vy_cc.dtype, device=device)
             vy_idx.append(idx)
         if "p" in valores:
             # pressao so tem grau de liberdade nos vertices (P1): descarta
             # nos de aresta do Tri6 que porventura estejam em `idx`.
             idx_p = idx[idx < npoints]
-            p_cc[idx_p] = valores["p"]
+            p_cc[idx_p] = torch.as_tensor(
+                valores_da_condicao(valores["p"], idx_p, X, Y, span), dtype=p_cc.dtype, device=device)
             p_idx.append(idx_p)
 
     vx_cc_pts = np.concatenate(vx_idx) if vx_idx else np.array([], dtype=int)

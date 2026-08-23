@@ -6,6 +6,9 @@ __pycache__/
 .pytest_cache/
 solucoes/**/*.vtk
 solucoes.zip
+configs/gui/
+configs/gui_saved/
+solucoes/gui/
 .~lock.*#
 CLAUDE.local.md
 docs/*.aux

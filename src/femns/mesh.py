@@ -284,3 +284,33 @@ def montar_node_to_elem(IEN: np.ndarray, npoints: int):
                 node_to_elem[a] = e
 
     return node_to_elem
+
+
+def montar_edge_to_elem(IEN: np.ndarray, npoints: int, n_extra: int):
+    """Monta, para cada no de aresta do elemento Tri6, o indice de um elemento que o contem.
+
+    Analogo a `montar_node_to_elem`, mas para os nos extras de aresta do
+    Tri6 (colunas 3:6 de `IEN`, ja' estendida por `elem_tri6`) em vez dos
+    vertices -- chute inicial para a busca por caminhada semi-Lagrangeana
+    quando o pe da caracteristica parte de um no de aresta
+    (`semi_lagrangian.calculo_sl(elemento="tri6")`).
+
+    Ao contrario do centroide do MINI, o no de aresta e' compartilhado
+    por ate 2 elementos (`elem_tri6` deduplica), sem um deles ser "o"
+    dono natural -- por isso essa semente precisa ser construida
+    varrendo a malha, e nao inferida por indice como
+    `np.arange(ne)` faz para o centroide (`elem_start_extra` default de
+    `calculo_sl`, valido so' para o MINI). Qualquer um dos elementos que
+    compartilham a aresta serve como semente: a caminhada corrige a
+    partir dai.
+
+    Retorna um array de tamanho `n_extra`, indexado por `no - npoints`.
+    """
+    edge_to_elem = np.full(n_extra, -1, dtype=int)
+    for e, elem in enumerate(IEN):
+        for a in elem[3:6]:
+            idx = a - npoints
+            if edge_to_elem[idx] == -1:
+                edge_to_elem[idx] = e
+
+    return edge_to_elem

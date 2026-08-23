@@ -81,13 +81,14 @@ def time_step(A: torch.Tensor, M: torch.Tensor, Gvx: torch.Tensor, Gvy: torch.Te
     Adveccao: se `vx_star`/`vy_star` forem passados (velocidade ja
     interpolada no pe da caracteristica, ver `femns.semi_lagrangian`),
     usa esse termo direto no RHS -- sem restricao de CFL. Caso
-    contrario (padrao), usa a adveccao linearizada explicita de hoje,
-    montada a partir de `vx, vy` e das matrizes convectivas `Gvx, Gvy`.
+    contrario (padrao), usa a adveccao Euleriana (`advection: eulerian` no
+    config): o termo convectivo linearizado na velocidade do passo
+    anterior, montado a partir de `vx, vy` e das matrizes `Gvx, Gvy`.
     A matriz `A` e identica nos dois casos -- ela nunca teve termo
     advectivo (ver docs/semi_lagrangian_strategy.pdf).
 
     Malha movel (ALE): se `wx, wy` (velocidade da malha, ver
-    `moving_mesh.velocidade_malha`) forem passados, a adveccao explicita
+    `moving_mesh.velocidade_malha`) forem passados, a adveccao Euleriana
     usa a velocidade **relativa** `v - w` como velocidade convectiva, que
     e' a forma ALE de `(v.grad)v` -- num referencial que se move, o que
     transporta e' o quanto o fluido anda *em relacao a malha*. Com

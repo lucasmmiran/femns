@@ -37,7 +37,7 @@ def parse_args():
 
 
 def preparar_campo_real(cfg: dict, device: torch.device):
-    """Monta a malha/sistema e roda 1 passo explicito real -- devolve um campo vx,vy nao trivial."""
+    """Monta a malha/sistema e roda 1 passo eulerian real -- devolve um campo vx,vy nao trivial."""
     dt = cfg["simulation"]["dt"]
     Re = cfg["simulation"]["reynolds"]
 
@@ -69,10 +69,10 @@ def preparar_campo_real(cfg: dict, device: torch.device):
     p[p_cc_pts] = p_cc[p_cc_pts]
     x0 = torch.cat([vx, vy, p / beta])
 
-    # 1 passo explicito real (advection default) -- campo pos-1-passo, nao trivial
+    # 1 passo eulerian real (advection default) -- campo pos-1-passo, nao trivial
     vx, vy, p, x0, info = time_step(
         A, M, Gvx, Gvy, vx, vy, dt, vx_cc, vy_cc, p_cc, vx_cc_pts, vy_cc_pts, p_cc_pts, npoints, ne, beta=beta, x0=x0)
-    print(f"Campo de teste: 1 passo explicito real (bicg iters={info['iters']}, residuo={info['residual']:.1e})")
+    print(f"Campo de teste: 1 passo eulerian real (bicg iters={info['iters']}, residuo={info['residual']:.1e})")
 
     return dict(
         IEN=IEN, IEN_t=IEN_t, X=X, Y=Y, X_t=X_t, Y_t=Y_t, EToE=EToE, node_to_elem=node_to_elem,

@@ -389,7 +389,7 @@ muito próximo da média dos vértices (esperado para um DOF nodal de
 escoamento suave) -- a fórmula crua interpretava isso como bolha
 "quase igual à média" \emph{somada} à própria média, dobrando o valor
 físico no centroide. Com a base nodal corrigida, a diferença entre
-\texttt{explicit} e \texttt{semi\_lagrangian} no Poiseuille de teste
+\texttt{eulerian} e \texttt{semi\_lagrangian} no Poiseuille de teste
 caiu para ${\sim}10^{-4}$--$10^{-3}$ relativo, o comportamento
 fisicamente esperado.
 
@@ -501,10 +501,10 @@ isoladamente, antes de plugar em \texttt{time\_step}.
 
 \textbf{Decisão}: as duas abordagens de advecção ficam lado a lado
 durante a validação, em vez de substituir a atual de uma vez. Um
-parâmetro novo no config (ex.\ \texttt{simulation.advection: explicit
+parâmetro novo no config (ex.\ \texttt{simulation.advection: eulerian
 | semi\_lagrangian}, junto de \texttt{dt}/\texttt{iterations}/
 \texttt{reynolds}) seleciona qual caminho \texttt{time\_step} usa a
-cada passo -- \texttt{explicit} continua montando $vg$ com $G_{vx},
+cada passo -- \texttt{eulerian} continua montando $vg$ com $G_{vx},
 G_{vy}$ como hoje, \texttt{semi\_lagrangian} usa
 \texttt{semi\_lagrangian.calculo\_sl}. Isso mantém as
 matrizes $G_{vx}, G_{vy}$ em uso normalmente até a migração ser
@@ -522,7 +522,7 @@ compatível com a ordem de erro esperada da interpolação P1+bolha, ver
 \S\ref{sec:interp-ordem}) faz sentido testar \texttt{dt} maior -- onde
 as duas deixam de ser diretamente comparáveis, já que aí é onde o
 semi-Lagrangeano deveria continuar estável e o explícito não. Remover
-$G_{vx}, G_{vy}$/\texttt{vg} e a opção \texttt{explicit} do config só
+$G_{vx}, G_{vy}$/\texttt{vg} e a opção \texttt{eulerian} do config só
 depois dessa validação, não antes.
 
 % =====================================================================

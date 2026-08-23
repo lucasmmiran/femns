@@ -6,8 +6,8 @@ simulation:
   dt: 0.001
   iterations: 1000
   reynolds: 1
-  advection: explicit  # explicit (padrao, hoje) ou semi_lagrangian
-  element: mini  # mini (padrao, hoje) ou tri6 -- semi_lagrangian ainda so suporta mini
+  advection: eulerian  # eulerian (padrao) ou semi_lagrangian
+  element: mini  # mini (padrao, hoje) ou tri6
 
 boundary:
   # Ordem de prioridade dos contornos, da mais baixa para a mais alta.

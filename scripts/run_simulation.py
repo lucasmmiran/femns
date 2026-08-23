@@ -20,6 +20,7 @@ from femns.mesh import (
     elem_mini,
     elem_tri6,
     estende_IENbound_tri6,
+    montar_edge_to_elem,
     montar_EToE,
     montar_node_to_elem,
     montar_NToN,
@@ -51,18 +52,22 @@ def main():
     dt = cfg["simulation"]["dt"]
     Iter = cfg["simulation"]["iterations"]
     Re = cfg["simulation"]["reynolds"]
-    advection = cfg["simulation"].get("advection", "explicit")
+    advection = cfg["simulation"].get("advection", "eulerian")
     element = cfg["simulation"].get("element", "mini")
     sl_boundary = cfg["simulation"].get("sl_boundary", "intercept")
+    if advection == "explicit":
+        raise ValueError(
+            "simulation.advection: 'explicit' foi renomeado para 'eulerian' -- "
+            "e a descricao Euleriana do termo convectivo, em contraste com 'semi_lagrangian'. "
+            "Atualize o config (o metodo em si nao mudou)."
+        )
+    if advection not in ("eulerian", "semi_lagrangian"):
+        raise ValueError(
+            f"simulation.advection desconhecido: {advection!r} (use 'eulerian' ou 'semi_lagrangian')")
     if element not in ("mini", "tri6"):
         raise ValueError(f"simulation.element desconhecido: {element!r} (use 'mini' ou 'tri6')")
     if sl_boundary not in ("dirichlet", "intercept"):
         raise ValueError(f"simulation.sl_boundary desconhecido: {sl_boundary!r} (use 'dirichlet' ou 'intercept')")
-    if element == "tri6" and advection == "semi_lagrangian":
-        raise ValueError(
-            "advection=semi_lagrangian ainda nao suporta element=tri6 -- "
-            "femns.semi_lagrangian.interpolate_mini e especifico da interpolacao P1+bolha do MINI."
-        )
     output_dir = cfg["output_dir"]
 
     start = timer()
@@ -107,7 +112,17 @@ def main():
     ccName = assign_boundary_names(IENbound_bc, mesh.IENboundElem, npoints, cfg["boundary"]["priority"],
                                     mesh.IENpoint, mesh.IENpointElem, nnodes=nnodes) # Roda a função que nomeia os pontos dos contornos com a priorização
     vx_cc, vy_cc, p_cc, vx_cc_pts, vy_cc_pts, p_cc_pts = build_boundary_conditions(
-        IENbound_bc, ccName, cfg["boundary"]["conditions"], npoints, device, mesh.IENpoint, nnodes=nnodes)
+        IENbound_bc, ccName, cfg["boundary"]["conditions"], npoints, device, mesh.IENpoint, nnodes=nnodes,
+        X=X_np, Y=Y_np, IENboundElem=mesh.IENboundElem)
+
+    # Dirichlet por no, ja resolvido (perfis inclusive) -- passado ao
+    # semi-Lagrangeano em vez de deixar ele reinterpretar o config, que nao
+    # enxerga a extensao geometrica dos contornos (ver calculo_sl).
+    has_vx_bc = np.zeros(nnodes, dtype=bool)
+    has_vy_bc = np.zeros(nnodes, dtype=bool)
+    has_vx_bc[vx_cc_pts.cpu().numpy()] = True
+    has_vy_bc[vy_cc_pts.cpu().numpy()] = True
+    bc_dirichlet = (vx_cc.cpu().numpy(), has_vx_bc, vy_cc.cpu().numpy(), has_vy_bc)
 
     # Conectividade de vizinhanca (malha so de vertices, antes de acrescentar os nos extras)
     NToN = montar_NToN(mesh.IEN, npoints)
@@ -115,6 +130,12 @@ def main():
     if advection == "semi_lagrangian":
         EToE, _ = montar_EToE(mesh.IEN)
         node_to_elem = montar_node_to_elem(mesh.IEN, npoints)
+        # No MINI o no extra `npoints+e` E' o centroide do elemento `e` --
+        # `calculo_sl` usa isso por padrao (`np.arange(ne)`). No Tri6 o no de
+        # aresta e' compartilhado entre ate 2 elementos, sem essa correspondencia
+        # direta por indice, entao precisa de uma semente construida (ver
+        # mesh.montar_edge_to_elem e o docstring de semi_lagrangian.calculo_sl).
+        elem_start_extra = montar_edge_to_elem(IEN_np, npoints, n_extra) if element == "tri6" else None
 
     IEN, X, Y = torch.from_numpy(IEN_np).to(device), torch.from_numpy(X_np).to(device), torch.from_numpy(Y_np).to(device)
 
@@ -272,7 +293,7 @@ def main():
                 Dy = (-torch.transpose(Gy, 0, 1)).coalesce().to_sparse_csr()
 
             # Velocidade da malha para a correcao ALE do termo convectivo
-            # (so o caminho explicito a usa: no semi-Lagrangeano a correcao
+            # (so o caminho eulerian a usa: no semi-Lagrangeano a correcao
             # e' geometrica, via X_campo/Y_campo abaixo).
             wx, wy = velocidade_malha(oscilacao, IEN, n * dt, nnodes, device=device)
 
@@ -282,7 +303,10 @@ def main():
                 EToE, node_to_elem, ccName, cfg["boundary"]["conditions"],
                 vx.cpu().numpy(), vy.cpu().numpy(), dt, npoints, ne,
                 fora_dominio=sl_boundary,
+                elemento=element,
+                elem_start_extra=elem_start_extra,
                 X_campo=X_campo.cpu().numpy(), Y_campo=Y_campo.cpu().numpy(),
+                bc_dirichlet=bc_dirichlet,
             )
             vx_star = torch.from_numpy(vx_star_np).to(device)
             vy_star = torch.from_numpy(vy_star_np).to(device)

@@ -17,7 +17,7 @@ Não são métricas — servem só pra saber o que gerou aquela linha.
 |---|---|
 | `timestamp` | Data/hora (local) em que a simulação terminou e a linha foi salva. |
 | `mesh` | Caminho do `.msh` usado (`cfg["mesh"]`). |
-| `advection` | `explicit` ou `semi_lagrangian` (`cfg["simulation"]["advection"]`) — qual formulação do termo convectivo foi usada nesse run. |
+| `advection` | `eulerian` ou `semi_lagrangian` (`cfg["simulation"]["advection"]`) — qual formulação do termo convectivo foi usada nesse run. |
 | `dt` | Passo de tempo. |
 | `reynolds` | Número de Reynolds da simulação. |
 | `iterations` | Quantas iterações de tempo foram rodadas. |

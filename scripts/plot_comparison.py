@@ -2,7 +2,7 @@
 """CLI: gera imagens lado a lado comparando a ultima solucao de duas simulacoes.
 
 Pensado pra comparar duas simulacoes da mesma malha (ex.: `simulation.element:
-mini` vs `tri6`, ou `simulation.advection: explicit` vs `semi_lagrangian`) --
+mini` vs `tri6`, ou `simulation.advection: eulerian` vs `semi_lagrangian`) --
 mesma escala de cor por variavel nos dois lados, pra comparacao visual direta.
 """
 

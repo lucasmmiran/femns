@@ -1,0 +1,43 @@
+# Poiseuille com perfil parabolico imposto na entrada e malha oscilando (ALE).
+#
+# Caso de validacao: com o perfil desenvolvido ja imposto na entrada, a
+# solucao exata e' `vx(y) = 6*y*(1-y)` (vmax=1.5 no centro, media 1) em
+# TODA a extensao do canal -- nao ha regiao de desenvolvimento. Entao
+# qualquer desvio e' erro de discretizacao + erro do ALE, e nao efeito de
+# entrada. Ver scripts/plot_poiseuille_validacao.py.
+mesh: meshes/poiseuille.msh
+output_dir: solucoes/poiseuille_estatica
+benchmark_xlsx: solucoes/benchmarks.xlsx
+
+simulation:
+  dt: 0.001
+  iterations: 1000
+  reynolds: 1
+  advection: semi_lagrangian  # eulerian (padrao) ou semi_lagrangian
+  sl_boundary: intercept
+  element: mini
+
+boundary:
+  priority: [outlet, inlet, top, bottom]
+  conditions:
+    # Perfil de Poiseuille imposto: vmax=1.5 da velocidade media 1, mesma
+    # vazao da entrada uniforme `vx: 1.0` usada em configs/poiseuille.yaml.
+    inlet:  {vx: {perfil: parabolico, vmax: 1.5}, vy: 0.0}
+    bottom: {vx: 0.0, vy: 0.0}
+    top:    {vx: 0.0, vy: 0.0}
+    outlet: {p: 0.0}
+
+moving_point:
+  enabled: false
+  node_index: 345
+  amplitude_factor: 0.1
+  omega: 628.3185307179587
+
+# Todos os nos interiores oscilam (ALE). omega escolhido para dar 50 passos
+# por periodo com dt=0.001 -- ver "amostragem no tempo" no README (o default
+# pi*200 daria 0.32 passos por periodo aqui, abaixo de Nyquist).
+mesh_motion:
+  enabled: false
+  amplitude_factor: 0.3
+  omega: 125.6637061435917  # 50 passos por periodo com dt=0.001
+  seed: 0
