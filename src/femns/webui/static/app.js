@@ -653,8 +653,17 @@ const Resultados = (() => {
   // zoom (scroll) / pan (arrastar com o botao direito) sobre o campo --
   // aplicado por cima do ajuste automatico de bbox, nao no lugar dele.
   let viewState = { zoom: 1, panX: 0, panY: 0 };
-  let savedOverlays = []; // plotagens carregadas de arquivo: {name, campo, color, samples, length}
+  let savedOverlays = []; // plotagens carregadas de arquivo: {name, campo, color, dash, samples, length}
   const OVERLAY_PALETTE = ["#f5a623", "#4caf7d", "#c77dff", "#f472b6", "#2dd4bf", "#a3e635", "#ff6b6b"];
+  // estilo (cor + tracado) da linha "ao vivo" (a que segue o quadro atual,
+  // em oposicao as plotagens salvas carregadas de arquivo em savedOverlays).
+  let liveLineStyle = { color: "#4f8cff", dash: "solid" };
+  const LINE_DASH_STYLES = {
+    solid: { label: "sólida", pattern: [] },
+    dashed: { label: "tracejada", pattern: [8, 4] },
+    dotted: { label: "pontilhada", pattern: [2, 3] },
+    dashdot: { label: "traço-ponto", pattern: [8, 3, 2, 3] },
+  };
 
   function jetColor(t) {
     t = Math.min(1, Math.max(0, t));
@@ -833,12 +842,26 @@ const Resultados = (() => {
       smoothBuffer.fill(0);
     }
 
+    // `putImageData` (no fim desta funcao) escreve pixels crus direto no
+    // canvas -- ao contrario de fill()/stroke(), ela IGNORA por completo a
+    // transformacao ativa (ctx.translate/scale do zoom/pan em render()).
+    // Por isso o zoom/pan tem que ser aplicado aqui manualmente, em cima
+    // das coordenadas de tela ja calculadas por `toPx` (o ajuste de
+    // bbox-pro-canvas de sempre) -- senao o campo fica "colado" na tela
+    // enquanto malha/grid/linha (desenhados com fill/stroke, que respeitam
+    // a transformacao) zoom/pan normalmente.
+    const zx = (x) => viewState.panX + viewState.zoom * x;
+    const zy = (y) => viewState.panY + viewState.zoom * y;
+
     for (const tri of frame.triangles) {
       const [a, b, c] = tri;
       const va = valores[a], vb = valores[b], vc = valores[c];
-      const [ax, ay] = toPx(frame.points[a][0], frame.points[a][1]);
-      const [bx, by] = toPx(frame.points[b][0], frame.points[b][1]);
-      const [cx, cy] = toPx(frame.points[c][0], frame.points[c][1]);
+      const [ax0, ay0] = toPx(frame.points[a][0], frame.points[a][1]);
+      const [bx0, by0] = toPx(frame.points[b][0], frame.points[b][1]);
+      const [cx0, cy0] = toPx(frame.points[c][0], frame.points[c][1]);
+      const ax = zx(ax0), ay = zy(ay0);
+      const bx = zx(bx0), by = zy(by0);
+      const cx = zx(cx0), cy = zy(cy0);
 
       const minX = Math.max(0, Math.floor(Math.min(ax, bx, cx)));
       const maxX = Math.min(W - 1, Math.ceil(Math.max(ax, bx, cx)));
@@ -904,7 +927,7 @@ const Resultados = (() => {
       const t = nSamples === 1 ? 0 : i / (nSamples - 1);
       const x = x1 + (x2 - x1) * t;
       const y = y1 + (y2 - y1) * t;
-      samples.push({ dist: t * length, value: interpolateFieldAt(x, y, frame, valores) });
+      samples.push({ dist: t * length, x, y, value: interpolateFieldAt(x, y, frame, valores) });
     }
     return { samples, length };
   }
@@ -940,34 +963,149 @@ const Resultados = (() => {
     ctx.restore();
   }
 
-  // `series`: [{name, campo, color, samples: [{dist,value|null}], length}] --
-  // uma entrada "ao vivo" (linha atual sobre o quadro corrente) opcional +
-  // qualquer numero de plotagens carregadas de arquivo, todas no mesmo
-  // grafico com legenda, pra comparar uma "contra" a outra.
-  function renderLinePlot(series) {
-    const lc = document.getElementById("r-line-canvas");
+  function drawLinePlotGrid(lctx, xMin, xMax, yMin, yMax, toX, toY, padLeft, padTop, w, h) {
+    const stepX = niceStep(xMax - xMin, 6);
+    const stepY = niceStep(yMax - yMin, 6);
+    lctx.save();
+    lctx.strokeStyle = "rgba(0,0,0,0.14)";
+    lctx.lineWidth = 1;
+    for (let x = Math.ceil(xMin / stepX) * stepX; x <= xMax + 1e-9; x += stepX) {
+      const px = toX(x);
+      lctx.beginPath();
+      lctx.moveTo(px, padTop);
+      lctx.lineTo(px, padTop + h);
+      lctx.stroke();
+    }
+    for (let y = Math.ceil(yMin / stepY) * stepY; y <= yMax + 1e-9; y += stepY) {
+      const py = toY(y);
+      lctx.beginPath();
+      lctx.moveTo(padLeft, py);
+      lctx.lineTo(padLeft + w, py);
+      lctx.stroke();
+    }
+    lctx.restore();
+  }
+
+  // Interpola linearmente o valor de `samples` (ordenadas por `coordOf`
+  // crescente, como `sampleLine` sempre gera) no ponto `target` da mesma
+  // coordenada. `null` se `target` cair fora do trecho coberto pela
+  // referencia ou entre dois pontos invalidos (fora do dominio da malha).
+  function interpolarEm(samples, coordOf, target) {
+    for (let i = 0; i < samples.length - 1; i++) {
+      const c0 = coordOf(samples[i]), c1 = coordOf(samples[i + 1]);
+      if ((target >= c0 && target <= c1) || (target <= c0 && target >= c1)) {
+        const v0 = samples[i].value, v1 = samples[i + 1].value;
+        if (v0 === null || v1 === null) return null;
+        const t = c1 === c0 ? 0 : (target - c0) / (c1 - c0);
+        return v0 + (v1 - v0) * t;
+      }
+    }
+    return null;
+  }
+
+  // Magnitude do erro relativo |(atual - referencia) / referencia|, ponto a
+  // ponto na mesma coordenada da linha atual -- a referencia (plotagem
+  // carregada) e' reamostrada por interpolacao linear pra alinhar com os
+  // pontos da linha atual, que podem ter numero/posicao de amostras
+  // diferentes. Plotada num grafico separado (ver renderLinePlot), nao
+  // misturada com a serie de valores.
+  function construirSerieErro(atual, referencia, coordKey) {
+    const coordOf = (p) => (coordKey === "dist" ? p.dist : (p[coordKey] ?? p.dist));
+    const samples = atual.samples.map((p) => {
+      const c = coordOf(p);
+      const vRef = interpolarEm(referencia.samples, coordOf, c);
+      let value = null;
+      if (p.value !== null && vRef !== null && Math.abs(vRef) > 1e-12) {
+        value = Math.abs((p.value - vRef) / vRef);
+      }
+      return { dist: p.dist, x: p.x, y: p.y, value };
+    });
+    return {
+      name: `erro relativo: ${atual.name} vs ${referencia.name}`,
+      campo: "|erro rel.|",
+      color: "#d6304a",
+      dash: "dashdot",
+      samples,
+      length: atual.length,
+    };
+  }
+
+  // `series`: [{name, campo, color, dash, samples: [{dist,value|null}], length}]
+  // Desenha em `canvasId` -- usado tanto pro grafico principal
+  // (r-line-canvas: linha atual + plotagens carregadas) quanto pro grafico
+  // de erro relativo, num canvas separado ao lado (r-error-canvas), que so'
+  // tem a serie de erro. `opts.forceAuto` ignora "eixos automaticos" (usado
+  // pelo grafico de erro, cuja escala de magnitude nao tem relacao com os
+  // limites manuais configurados pra variavel do grafico principal).
+  function renderLinePlot(canvasId, series, opts = {}) {
+    const lc = document.getElementById(canvasId);
     const lctx = lc.getContext("2d");
-    lctx.clearRect(0, 0, lc.width, lc.height);
+
+    // fundo sempre branco, pintado dentro do proprio canvas (nao so' via
+    // CSS do wrapper) -- assim "salvar imagem" do canvas sai com fundo em
+    // vez de transparente.
+    lctx.fillStyle = "#ffffff";
+    lctx.fillRect(0, 0, lc.width, lc.height);
 
     const allValid = series.flatMap((s) => s.samples.filter((p) => p.value !== null));
     if (!allValid.length) {
-      lctx.fillStyle = "rgba(230,233,239,0.5)";
+      lctx.fillStyle = "rgba(0,0,0,0.45)";
       lctx.font = "12px system-ui, sans-serif";
       lctx.fillText("Linha fora do domínio da malha.", 10, lc.height / 2);
       return;
     }
-    const vmin = Math.min(...allValid.map((p) => p.value));
-    const vmax = Math.max(...allValid.map((p) => p.value));
-    const range = vmax - vmin || 1;
-    const maxLength = Math.max(...series.map((s) => s.length || 0), 1e-9);
-    const padTop = 28, padBottom = 24, padLeft = 56, padRight = 14;
+
+    // coordenada (posicao ao longo da linha): distancia (padrao), x ou y do
+    // proprio ponto amostrado -- pontos de arquivos salvos antes dessa opcao
+    // existir nao tem x/y gravado, caem de volta pra distancia. Por padrao
+    // vai no eixo horizontal e a variavel (r-line-y-axis, ja' resolvida em
+    // p.value na amostragem) no vertical; "eixo invertido" troca os dois --
+    // vale igual pro grafico de erro, que usa a mesma coordenada/orientacao
+    // do grafico principal (so' a "variavel" dele e' a magnitude do erro).
+    const coordKey = document.getElementById("r-line-x-axis").value;
+    const coordOf = (p) => (coordKey === "dist" ? p.dist : (p[coordKey] ?? p.dist));
+    const varOf = (p) => p.value;
+    const invert = document.getElementById("r-line-axes-invert").checked;
+    const horizOf = invert ? varOf : coordOf;
+    const vertOf = invert ? coordOf : varOf;
+
+    const autoAxes = opts.forceAuto || document.getElementById("r-line-axes-auto").checked;
+    let xMin, xMax, yMin, yMax;
+    if (autoAxes) {
+      const hs = allValid.map(horizOf);
+      const vs = allValid.map(vertOf);
+      xMin = Math.min(...hs);
+      xMax = Math.max(...hs);
+      yMin = Math.min(...vs);
+      yMax = Math.max(...vs);
+    } else {
+      xMin = parseFloat(document.getElementById("r-line-xmin").value);
+      xMax = parseFloat(document.getElementById("r-line-xmax").value);
+      yMin = parseFloat(document.getElementById("r-line-ymin").value);
+      yMax = parseFloat(document.getElementById("r-line-ymax").value);
+      if (!Number.isFinite(xMin)) xMin = 0;
+      if (!Number.isFinite(xMax) || xMax <= xMin) xMax = xMin + 1;
+      if (!Number.isFinite(yMin)) yMin = 0;
+      if (!Number.isFinite(yMax) || yMax <= yMin) yMax = yMin + 1;
+    }
+    const xRange = xMax - xMin || 1;
+    const yRange = yMax - yMin || 1;
+
+    // legenda agora fica abaixo do grafico (nao mais por cima, no topo) --
+    // padTop soh precisa de folga pro rotulo do maximo do eixo vertical;
+    // padBottom cobre os rotulos do eixo horizontal + a linha de legenda.
+    const padTop = 18, padBottom = 46, padLeft = 56, padRight = 14;
     const w = lc.width - padLeft - padRight;
     const h = lc.height - padTop - padBottom;
 
-    const toX = (d) => padLeft + (d / maxLength) * w;
-    const toY = (v) => padTop + h - ((v - vmin) / range) * h;
+    const toX = (d) => padLeft + ((d - xMin) / xRange) * w;
+    const toY = (v) => padTop + h - ((v - yMin) / yRange) * h;
 
-    lctx.strokeStyle = "rgba(255,255,255,0.25)";
+    if (document.getElementById("r-line-grid-toggle").checked) {
+      drawLinePlotGrid(lctx, xMin, xMax, yMin, yMax, toX, toY, padLeft, padTop, w, h);
+    }
+
+    lctx.strokeStyle = "rgba(0,0,0,0.55)";
     lctx.lineWidth = 1;
     lctx.beginPath();
     lctx.moveTo(padLeft, padTop);
@@ -975,75 +1113,131 @@ const Resultados = (() => {
     lctx.lineTo(padLeft + w, padTop + h);
     lctx.stroke();
 
-    lctx.fillStyle = "rgba(230,233,239,0.7)";
+    lctx.fillStyle = "rgba(0,0,0,0.8)";
     lctx.font = "10px system-ui, sans-serif";
     lctx.textAlign = "right";
-    lctx.fillText(vmax.toPrecision(4), padLeft - 6, padTop + 8);
-    lctx.fillText(vmin.toPrecision(4), padLeft - 6, padTop + h);
+    lctx.fillText(yMax.toPrecision(4), padLeft - 6, padTop + 8);
+    lctx.fillText(yMin.toPrecision(4), padLeft - 6, padTop + h);
     lctx.textAlign = "center";
-    lctx.fillText("0", padLeft, padTop + h + 14);
-    lctx.fillText(maxLength.toPrecision(4), padLeft + w, padTop + h + 14);
+    lctx.fillText(xMin.toPrecision(4), padLeft, padTop + h + 14);
+    lctx.fillText(xMax.toPrecision(4), padLeft + w, padTop + h + 14);
 
+    // recorta pro retangulo do grafico -- com eixos manuais mais estreitos
+    // que os dados, a linha nao pode vazar por cima dos rotulos/legenda.
+    lctx.save();
+    lctx.beginPath();
+    lctx.rect(padLeft, padTop, w, h);
+    lctx.clip();
     for (const s of series) {
       lctx.strokeStyle = s.color;
       lctx.lineWidth = 2;
+      lctx.setLineDash((LINE_DASH_STYLES[s.dash] || LINE_DASH_STYLES.solid).pattern);
       lctx.beginPath();
       let started = false;
       for (const p of s.samples) {
         if (p.value === null) { started = false; continue; }
-        const px = toX(p.dist), py = toY(p.value);
+        const px = toX(horizOf(p)), py = toY(vertOf(p));
         if (!started) { lctx.moveTo(px, py); started = true; }
         else lctx.lineTo(px, py);
       }
       lctx.stroke();
     }
+    lctx.setLineDash([]);
+    lctx.restore();
 
-    // legenda: swatch + "nome (campo)" por serie, em linha no topo do grafico
+    // legenda: amostra da linha (cor + tracado) + "nome (campo)" por serie,
+    // numa linha abaixo dos rotulos do eixo horizontal.
     let lx = padLeft;
-    const ly = 12;
+    const ly = padTop + h + 34;
     lctx.font = "10px system-ui, sans-serif";
     lctx.textAlign = "left";
     for (const s of series) {
       const label = `${s.name} (${s.campo})`;
-      lctx.fillStyle = s.color;
-      lctx.fillRect(lx, ly - 7, 10, 3);
-      lctx.fillStyle = "rgba(230,233,239,0.85)";
-      lctx.fillText(label, lx + 14, ly);
-      lx += 14 + lctx.measureText(label).width + 16;
+      lctx.strokeStyle = s.color;
+      lctx.lineWidth = 2;
+      lctx.setLineDash((LINE_DASH_STYLES[s.dash] || LINE_DASH_STYLES.solid).pattern);
+      lctx.beginPath();
+      lctx.moveTo(lx, ly - 4);
+      lctx.lineTo(lx + 14, ly - 4);
+      lctx.stroke();
+      lctx.setLineDash([]);
+      lctx.fillStyle = "rgba(0,0,0,0.85)";
+      lctx.fillText(label, lx + 18, ly);
+      lx += 18 + lctx.measureText(label).width + 16;
       if (lx > lc.width - padRight - 40) { lx = padLeft; break; } // sem quebra de linha -- so evita estourar o canvas
     }
   }
 
-  function updateLinePlot(frame, valores) {
+  function updateLinePlot(frame) {
     const hint = document.getElementById("r-line-hint");
+    const errorWrap = document.getElementById("r-error-canvas-wrap");
     const series = [];
+    let liveSeries = null;
 
     if (line) {
       const nSamples = Math.max(2, parseInt(document.getElementById("r-line-samples").value, 10) || 200);
-      const { samples, length } = sampleLine(frame, valores, line, nSamples);
-      const campo = document.getElementById("r-field").value;
+      // eixo vertical do grafico sobre a linha e' independente do campo
+      // mostrado no canvas 2D (r-field) -- assim da pra, por exemplo, olhar
+      // a pressao no campo e o vx ao longo da linha ao mesmo tempo.
+      const campo = document.getElementById("r-line-y-axis").value;
+      const yValores = fieldValues(frame, campo);
+      const { samples, length } = sampleLine(frame, yValores, line, nSamples);
       const name = document.getElementById("r-line-name").value.trim() || "atual";
-      series.push({ name, campo: campo === "mag" ? "|v|" : campo, color: "#4f8cff", samples, length });
+      liveSeries = {
+        name, campo: campo === "mag" ? "|v|" : campo,
+        color: liveLineStyle.color, dash: liveLineStyle.dash, samples, length,
+      };
+      series.push(liveSeries);
     }
     series.push(...savedOverlays);
+
+    // erro relativo: grafico separado, ao lado do principal (nao misturado
+    // na mesma serie/eixo de valor, ver renderLinePlot).
+    let errorSeries = null;
+    const errorOn = document.getElementById("r-line-error-toggle").checked;
+    if (errorOn && liveSeries && savedOverlays.length) {
+      const refIdx = parseInt(document.getElementById("r-line-error-ref").value, 10);
+      const referencia = savedOverlays[refIdx];
+      if (referencia) {
+        const coordKey = document.getElementById("r-line-x-axis").value;
+        errorSeries = construirSerieErro(liveSeries, referencia, coordKey);
+      }
+    }
+    errorWrap.hidden = !errorSeries;
+    if (errorSeries) renderLinePlot("r-error-canvas", [errorSeries], { forceAuto: true });
 
     if (!series.length) {
       hint.hidden = false;
       hint.textContent = "Nenhuma linha definida.";
       const lc = document.getElementById("r-line-canvas");
-      lc.getContext("2d").clearRect(0, 0, lc.width, lc.height);
+      lc.getContext("2d").fillStyle = "#ffffff";
+      lc.getContext("2d").fillRect(0, 0, lc.width, lc.height);
       return;
     }
     hint.hidden = true;
-    renderLinePlot(series);
+    renderLinePlot("r-line-canvas", series);
   }
 
   function renderOverlayList() {
     const ul = document.getElementById("r-line-overlays");
     ul.innerHTML = "";
     savedOverlays.forEach((ov, idx) => {
+      const colorInput = el("input", {
+        type: "color", value: ov.color, class: "overlay-color", title: "Cor da linha",
+      });
+      colorInput.addEventListener("input", () => { ov.color = colorInput.value; rerender(); });
+
+      const dashSelect = el(
+        "select",
+        { class: "overlay-dash", title: "Estilo da linha" },
+        Object.entries(LINE_DASH_STYLES).map(([value, { label }]) => el("option", { value, text: label })),
+      );
+      dashSelect.value = ov.dash || "solid";
+      dashSelect.addEventListener("change", () => { ov.dash = dashSelect.value; rerender(); });
+
       ul.appendChild(el("li", { class: "overlay-chip" }, [
-        el("span", { class: "overlay-swatch", style: `background:${ov.color}` }),
+        colorInput,
+        dashSelect,
         el("span", { class: "name", text: `${ov.name} (${ov.campo})` }),
         el("button", {
           type: "button",
@@ -1053,6 +1247,24 @@ const Resultados = (() => {
         }),
       ]));
     });
+
+    // seletor de referencia do erro relativo -- so' faz sentido com pelo
+    // menos uma plotagem carregada; tenta manter a mesma referencia
+    // selecionada (por nome) quando a lista muda de tamanho/ordem.
+    const refSelect = document.getElementById("r-line-error-ref");
+    const nomePrevio = savedOverlays[parseInt(refSelect.value, 10)]?.name;
+    refSelect.innerHTML = "";
+    savedOverlays.forEach((ov, idx) => {
+      refSelect.appendChild(el("option", { value: String(idx), text: `${ov.name} (${ov.campo})` }));
+    });
+    const hasOverlays = savedOverlays.length > 0;
+    document.getElementById("r-line-error-toggle").disabled = !hasOverlays;
+    refSelect.disabled = !hasOverlays;
+    if (!hasOverlays) document.getElementById("r-line-error-toggle").checked = false;
+    if (hasOverlays) {
+      const mantidoIdx = savedOverlays.findIndex((o) => o.name === nomePrevio);
+      refSelect.value = String(mantidoIdx >= 0 ? mantidoIdx : 0);
+    }
   }
 
   function setLine(x1, y1, x2, y2) {
@@ -1086,9 +1298,34 @@ const Resultados = (() => {
     document.getElementById("r-line-draw").textContent = "Desenhar linha";
   }
 
+  // Limpa a linha e os campos x1/y1/x2/y2 -- usado tanto pelo botao
+  // "remover linha" quanto ao trocar de simulacao (r-run), onde uma linha
+  // desenhada sobre a geometria antiga nao faz sentido pra nova.
+  function clearLine() {
+    line = null;
+    document.getElementById("r-line-toggle").checked = false;
+    document.getElementById("r-line-toggle").disabled = true;
+    document.getElementById("r-line-clear").disabled = true;
+    document.getElementById("r-line-save").disabled = true;
+    for (const id of ["r-line-x1", "r-line-y1", "r-line-x2", "r-line-y2"]) document.getElementById(id).value = "";
+  }
+
   function bindLineControls() {
     document.getElementById("r-line-draw").addEventListener("click", () => {
       if (drawingLine) { stopDrawingLine(); rerender(); return; }
+
+      // se x1/y1/x2/y2 ja' estiverem preenchidos (o usuario digitou os
+      // valores em vez de clicar 2 pontos), desenha direto com eles em vez
+      // de entrar no modo "clique 2 pontos" -- a linha resultante pode ser
+      // ajustada depois do mesmo jeito de sempre (reclicar/editar os campos).
+      const coordIds = ["r-line-x1", "r-line-y1", "r-line-x2", "r-line-y2"];
+      const vals = coordIds.map((id) => parseFloat(document.getElementById(id).value));
+      if (vals.every((v) => Number.isFinite(v))) {
+        setLine(vals[0], vals[1], vals[2], vals[3]);
+        rerender();
+        return;
+      }
+
       drawingLine = true;
       drawFirstPoint = null;
       canvas.style.cursor = "crosshair";
@@ -1110,12 +1347,7 @@ const Resultados = (() => {
     });
 
     document.getElementById("r-line-clear").addEventListener("click", () => {
-      line = null;
-      document.getElementById("r-line-toggle").checked = false;
-      document.getElementById("r-line-toggle").disabled = true;
-      document.getElementById("r-line-clear").disabled = true;
-      document.getElementById("r-line-save").disabled = true;
-      for (const id of ["r-line-x1", "r-line-y1", "r-line-x2", "r-line-y2"]) document.getElementById(id).value = "";
+      clearLine();
       rerender();
     });
 
@@ -1133,6 +1365,60 @@ const Resultados = (() => {
     document.getElementById("r-line-toggle").addEventListener("change", rerender);
     document.getElementById("r-line-samples").addEventListener("input", rerender);
 
+    // -- aparencia do grafico sobre a linha: grid, eixos manuais,
+    // cor/tracado da linha "ao vivo" (fundo e' sempre branco, sem opcao de
+    // escolher -- ver renderLinePlot) ------------------------------------
+    document.getElementById("r-line-grid-toggle").addEventListener("change", rerender);
+    const axesManual = document.getElementById("r-line-axes-manual");
+    axesManual.style.display = "none"; // estado inicial = "eixos automaticos" marcado
+    document.getElementById("r-line-axes-auto").addEventListener("change", async (e) => {
+      const manual = !e.target.checked;
+      axesManual.style.display = manual ? "" : "none";
+      // pre-preenche os campos manuais com o range atual (em vez de comecar
+      // vazio, que cairia no 0-1 generico do fallback em renderLinePlot) --
+      // assim o usuario so ajusta a partir de algo plausivel.
+      if (manual && currentRun) {
+        const frame = await getFrame(frameNumbers[frameIdx]);
+        const campo = document.getElementById("r-line-y-axis").value;
+        const valores = fieldValues(frame, campo);
+        const series = [...savedOverlays];
+        if (line) {
+          const nSamples = Math.max(2, parseInt(document.getElementById("r-line-samples").value, 10) || 200);
+          series.push(sampleLine(frame, valores, line, nSamples));
+        }
+        const allValid = series.flatMap((s) => s.samples.filter((p) => p.value !== null));
+        if (allValid.length) {
+          const coordKey = document.getElementById("r-line-x-axis").value;
+          const coordOf = (p) => (coordKey === "dist" ? p.dist : (p[coordKey] ?? p.dist));
+          const varOf = (p) => p.value;
+          const invert = document.getElementById("r-line-axes-invert").checked;
+          const horizOf = invert ? varOf : coordOf;
+          const vertOf = invert ? coordOf : varOf;
+          document.getElementById("r-line-xmin").value = Math.min(...allValid.map(horizOf)).toPrecision(4);
+          document.getElementById("r-line-xmax").value = Math.max(...allValid.map(horizOf)).toPrecision(4);
+          document.getElementById("r-line-ymin").value = Math.min(...allValid.map(vertOf)).toPrecision(4);
+          document.getElementById("r-line-ymax").value = Math.max(...allValid.map(vertOf)).toPrecision(4);
+        }
+      }
+      rerender();
+    });
+    for (const id of ["r-line-xmin", "r-line-xmax", "r-line-ymin", "r-line-ymax"]) {
+      document.getElementById(id).addEventListener("input", rerender);
+    }
+    document.getElementById("r-line-x-axis").addEventListener("change", rerender);
+    document.getElementById("r-line-y-axis").addEventListener("change", rerender);
+    document.getElementById("r-line-axes-invert").addEventListener("change", rerender);
+    document.getElementById("r-line-error-toggle").addEventListener("change", rerender);
+    document.getElementById("r-line-error-ref").addEventListener("change", rerender);
+    document.getElementById("r-line-color").addEventListener("input", (e) => {
+      liveLineStyle.color = e.target.value;
+      rerender();
+    });
+    document.getElementById("r-line-dash").addEventListener("change", (e) => {
+      liveLineStyle.dash = e.target.value;
+      rerender();
+    });
+
     // -- salvar/carregar plotagens em arquivo .json --------------------
     document.getElementById("r-line-save").addEventListener("click", async () => {
       if (!line || !currentRun) return;
@@ -1146,6 +1432,8 @@ const Resultados = (() => {
       downloadJSON(`femns-line-${slugify(name)}.json`, {
         name,
         campo: campo === "mag" ? "|v|" : campo,
+        color: liveLineStyle.color,
+        dash: liveLineStyle.dash,
         line: { ...line },
         length,
         samples,
@@ -1166,12 +1454,16 @@ const Resultados = (() => {
       try {
         const data = JSON.parse(await file.text());
         if (!Array.isArray(data.samples)) throw new Error("arquivo sem 'samples' -- não é uma plotagem salva pelo femns");
-        const color = OVERLAY_PALETTE[savedOverlays.length % OVERLAY_PALETTE.length];
+        // cor/estilo do proprio arquivo, se foi salvo por uma versao que ja
+        // gravava isso -- senao cai no palete automatico + solida de sempre.
+        const color = data.color || OVERLAY_PALETTE[savedOverlays.length % OVERLAY_PALETTE.length];
+        const dash = data.dash && LINE_DASH_STYLES[data.dash] ? data.dash : "solid";
         const length = data.length ?? (data.samples.length ? data.samples[data.samples.length - 1].dist : 0);
         savedOverlays.push({
           name: data.name || file.name.replace(/\.json$/i, ""),
           campo: data.campo || "?",
           color,
+          dash,
           samples: data.samples,
           length,
         });
@@ -1193,6 +1485,18 @@ const Resultados = (() => {
         rerender();
       }
     }).observe(wrap);
+
+    const errorWrap = document.getElementById("r-error-canvas-wrap");
+    const errorCanvas = document.getElementById("r-error-canvas");
+    new ResizeObserver(() => {
+      const w = Math.max(1, Math.round(errorWrap.clientWidth));
+      const h = Math.max(1, Math.round(errorWrap.clientHeight));
+      if (errorCanvas.width !== w || errorCanvas.height !== h) {
+        errorCanvas.width = w;
+        errorCanvas.height = h;
+        rerender();
+      }
+    }).observe(errorWrap);
   }
 
   function render(frame) {
@@ -1259,7 +1563,7 @@ const Resultados = (() => {
     drawLineOverlay(toPx);
     ctx.restore();
 
-    updateLinePlot(frame, valores);
+    updateLinePlot(frame);
   }
 
   // -- zoom (scroll) / pan (arrastar com botao direito) sobre o campo -----
@@ -1353,6 +1657,8 @@ const Resultados = (() => {
   async function loadRun(runId) {
     stopPlay();
     viewState = { zoom: 1, panX: 0, panY: 0 }; // simulacao nova = geometria nova, comeca sem zoom/pan
+    stopDrawingLine();
+    clearLine(); // linha desenhada sobre a geometria antiga nao faz sentido pra nova simulacao
     currentRun = { id: runId, meta: await api(`/api/results/${runId}/meta`) };
     frameNumbers = [];
     for (let n = currentRun.meta.first_frame; n <= currentRun.meta.last_frame; n++) frameNumbers.push(n);

@@ -383,22 +383,38 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .overlay-list { list-style: none; margin: 0.5rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
 .overlay-chip { display: flex; align-items: center; gap: 0.4rem; background: var(--panel-2); border: 1px solid var(--border); border-radius: 2px; padding: 0.3rem 0.5rem; font-family: var(--font-mono); font-size: 0.76rem; }
 .overlay-chip .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.overlay-chip .overlay-swatch { display: inline-block; width: 0.7rem; height: 0.7rem; border-radius: 1px; flex: none; }
 .overlay-chip button { padding: 0.1rem 0.4rem; font-size: 0.7rem; flex: none; }
+.overlay-chip .overlay-color { width: 1.4rem; height: 1.1rem; padding: 0; border-radius: 1px; flex: none; }
+.overlay-chip .overlay-dash {
+  flex: none;
+  padding: 0.1rem 0.25rem;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+}
 
 .line-plot-panel { margin-top: 1rem; }
 .line-plot-header { display: flex; justify-content: space-between; align-items: baseline; gap: 0.6rem; margin-bottom: 0.4rem; }
 .line-plot-header h3 { margin: 0; font-family: var(--font-display); font-size: 0.85rem; color: var(--text); text-transform: uppercase; }
 .line-plot-header .hint { margin: 0; }
+.line-plot-charts { display: flex; gap: 0.75rem; overflow-x: auto; }
+
 .line-canvas-wrap {
   resize: both;
   overflow: hidden;
-  width: 100%;
-  height: 220px;
-  max-width: 100%;
-  min-width: 300px;
-  min-height: 140px;
-  background: var(--canvas-bg);
+  /* flex-basis precisa ser "auto" (nao um comprimento fixo) pra respeitar o
+     width abaixo -- com flex-basis fixo (ex. "0 0 400px"), o algoritmo de
+     flexbox reimpoe 400px de largura a cada layout, brigando com o
+     arrasto do "resize" na horizontal (a vertical nao e' afetada porque
+     ela e' o eixo cruzado do flex row, nao o eixo principal). */
+  flex: 0 0 auto;
+  width: 400px;
+  height: 400px;
+  min-width: 120px;
+  min-height: 120px;
+  /* sempre branco (letras/grid do grafico sao pretas por cima) -- pintado
+     tambem dentro do proprio canvas em renderLinePlot, pra "salvar imagem"
+     do canvas nao sair com fundo transparente. */
+  background: #ffffff;
   border: 1px solid var(--border);
   border-radius: 2px;
 }

@@ -39,7 +39,7 @@ def scan_runs(root: str) -> dict[str, dict]:
         rid = _run_id(dirpath)
         runs[rid] = {
             "dir": dirpath,
-            "label": os.path.relpath(dirpath, root),
+            "label": os.path.relpath(dirpath, root).replace(os.sep, "/"),
             "nframes": len(frames),
         }
     return runs

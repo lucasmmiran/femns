@@ -216,6 +216,55 @@
             <span>Pontos de amostragem</span>
             <input id="r-line-samples" type="number" min="2" max="2000" step="1" value="200">
           </label>
+
+          <details class="advanced">
+            <summary>Avançado: eixos do gráfico sobre a linha</summary>
+
+            <label class="field-inline"><input id="r-line-axes-auto" type="checkbox" checked> eixos automáticos</label>
+            <fieldset class="grid2" id="r-line-axes-manual">
+              <label class="field"><span>horizontal mín</span><input id="r-line-xmin" type="number" step="any"></label>
+              <label class="field"><span>horizontal máx</span><input id="r-line-xmax" type="number" step="any"></label>
+              <label class="field"><span>vertical mín</span><input id="r-line-ymin" type="number" step="any"></label>
+              <label class="field"><span>vertical máx</span><input id="r-line-ymax" type="number" step="any"></label>
+            </fieldset>
+
+            <fieldset class="grid2">
+              <label class="field">
+                <span>Coordenada</span>
+                <select id="r-line-x-axis">
+                  <option value="dist" selected>distância na linha</option>
+                  <option value="x">coordenada x</option>
+                  <option value="y">coordenada y</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Variável</span>
+                <select id="r-line-y-axis">
+                  <option value="vx" selected>vx</option>
+                  <option value="vy">vy</option>
+                  <option value="p">p</option>
+                  <option value="mag">|v|</option>
+                </select>
+              </label>
+            </fieldset>
+            <label class="field-inline">
+              <input id="r-line-axes-invert" type="checkbox">
+              eixo invertido (variável no horizontal, coordenada no vertical)
+            </label>
+
+            <fieldset class="advanced-block">
+              <legend>Erro relativo</legend>
+              <label class="field-inline">
+                <input id="r-line-error-toggle" type="checkbox" disabled>
+                mostrar erro relativo (linha atual vs. plotagem carregada)
+              </label>
+              <label class="field">
+                <span>Comparar linha atual com</span>
+                <select id="r-line-error-ref" disabled></select>
+              </label>
+            </fieldset>
+          </details>
+
           <label class="field">
             <span>Nome desta plotagem</span>
             <input id="r-line-name" type="text" placeholder="ex.: degrau-vx-t1000">
@@ -255,8 +304,27 @@
               <h3>Gráfico sobre a linha</h3>
               <span id="r-line-hint" class="hint">Nenhuma linha definida.</span>
             </div>
-            <div id="r-line-canvas-wrap" class="line-canvas-wrap">
-              <canvas id="r-line-canvas" width="900" height="220"></canvas>
+
+            <div class="viewer-toolbar">
+              <label class="field-inline"><input id="r-line-grid-toggle" type="checkbox"> grid</label>
+              <label class="field-inline">Linha atual <input id="r-line-color" type="color" value="#4f8cff"></label>
+              <label class="field-inline">Estilo
+                <select id="r-line-dash">
+                  <option value="solid">sólida</option>
+                  <option value="dashed">tracejada</option>
+                  <option value="dotted">pontilhada</option>
+                  <option value="dashdot">traço-ponto</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="line-plot-charts">
+              <div id="r-line-canvas-wrap" class="line-canvas-wrap">
+                <canvas id="r-line-canvas" width="400" height="400"></canvas>
+              </div>
+              <div id="r-error-canvas-wrap" class="line-canvas-wrap" hidden>
+                <canvas id="r-error-canvas" width="400" height="400"></canvas>
+              </div>
             </div>
           </div>
         </div>

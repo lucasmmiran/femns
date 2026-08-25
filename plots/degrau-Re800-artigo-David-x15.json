@@ -1,0 +1,145 @@
+{
+  "name": "degrau-Re800-artigo-David-x15",
+  "campo": "vx",
+  "color": "#f5a623",
+  "dash": "dashed",
+  "line": {
+    "x1": 15.0,
+    "y1": -0.5,
+    "x2": 15.0,
+    "y2": 0.5
+  },
+  "length": 1.0,
+  "samples": [
+    {
+      "dist": 0.0,
+      "x": 15.0,
+      "y": -0.5,
+      "value": 0.0
+    },
+    {
+      "dist": 0.05,
+      "x": 15.0,
+      "y": -0.45,
+      "value": 0.109
+    },
+    {
+      "dist": 0.1,
+      "x": 15.0,
+      "y": -0.4,
+      "value": 0.218
+    },
+    {
+      "dist": 0.15,
+      "x": 15.0,
+      "y": -0.35,
+      "value": 0.328
+    },
+    {
+      "dist": 0.2,
+      "x": 15.0,
+      "y": -0.3,
+      "value": 0.438
+    },
+    {
+      "dist": 0.25,
+      "x": 15.0,
+      "y": -0.25,
+      "value": 0.547
+    },
+    {
+      "dist": 0.3,
+      "x": 15.0,
+      "y": -0.2,
+      "value": 0.649
+    },
+    {
+      "dist": 0.35,
+      "x": 15.0,
+      "y": -0.15,
+      "value": 0.737
+    },
+    {
+      "dist": 0.4,
+      "x": 15.0,
+      "y": -0.1,
+      "value": 0.804
+    },
+    {
+      "dist": 0.45,
+      "x": 15.0,
+      "y": -0.05,
+      "value": 0.844
+    },
+    {
+      "dist": 0.5,
+      "x": 15.0,
+      "y": 0.0,
+      "value": 0.853
+    },
+    {
+      "dist": 0.55,
+      "x": 15.0,
+      "y": 0.05,
+      "value": 0.831
+    },
+    {
+      "dist": 0.6,
+      "x": 15.0,
+      "y": 0.1,
+      "value": 0.779
+    },
+    {
+      "dist": 0.65,
+      "x": 15.0,
+      "y": 0.15,
+      "value": 0.704
+    },
+    {
+      "dist": 0.7,
+      "x": 15.0,
+      "y": 0.2,
+      "value": 0.613
+    },
+    {
+      "dist": 0.75,
+      "x": 15.0,
+      "y": 0.25,
+      "value": 0.512
+    },
+    {
+      "dist": 0.8,
+      "x": 15.0,
+      "y": 0.3,
+      "value": 0.408
+    },
+    {
+      "dist": 0.85,
+      "x": 15.0,
+      "y": 0.35,
+      "value": 0.304
+    },
+    {
+      "dist": 0.9,
+      "x": 15.0,
+      "y": 0.4,
+      "value": 0.202
+    },
+    {
+      "dist": 0.95,
+      "x": 15.0,
+      "y": 0.45,
+      "value": 0.101
+    },
+    {
+      "dist": 1.0,
+      "x": 15.0,
+      "y": 0.5,
+      "value": 0.0
+    }
+  ],
+  "run_label": "referência (artigo, Re=800, x=15)",
+  "frame": null,
+  "saved_at": "2026-08-25T21:51:44.341254+00:00",
+  "fonte": "Tabela digitada manualmente de artigo de referencia (Re=800, estacao x=15) para validacao do backward-facing step. Coordenadas (x=15, y de 0.50 a -0.50) sao as do proprio artigo -- normalizadas pela altura do degrau/canal, nao necessariamente as mesmas coordenadas fisicas de meshes/degrau.msh. u do artigo mapeado para 'vx' (velocidade longitudinal) na convencao do femns."
+}
