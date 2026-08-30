@@ -55,6 +55,7 @@ def main():
     advection = cfg["simulation"].get("advection", "eulerian")
     element = cfg["simulation"].get("element", "mini")
     sl_boundary = cfg["simulation"].get("sl_boundary", "intercept")
+    vtk_interval = cfg["simulation"].get("vtk_interval", 10)
     if advection == "explicit":
         raise ValueError(
             "simulation.advection: 'explicit' foi renomeado para 'eulerian' -- "
@@ -68,6 +69,10 @@ def main():
         raise ValueError(f"simulation.element desconhecido: {element!r} (use 'mini' ou 'tri6')")
     if sl_boundary not in ("dirichlet", "intercept"):
         raise ValueError(f"simulation.sl_boundary desconhecido: {sl_boundary!r} (use 'dirichlet' ou 'intercept')")
+    if not isinstance(vtk_interval, int) or isinstance(vtk_interval, bool) or vtk_interval <= 0:
+        raise ValueError(
+            f"simulation.vtk_interval precisa ser um inteiro positivo (recebido: {vtk_interval!r}) -- "
+            f"grava um .vtk a cada N iteracoes; a ultima iteracao e' sempre gravada")
     output_dir = cfg["output_dir"]
 
     start = timer()
@@ -84,6 +89,10 @@ def main():
     if advection == "semi_lagrangian":
         print(f'Tratamento fora do dominio: {sl_boundary}')
     print(f'Elemento: {element}')
+    if vtk_interval == 1:
+        print('Gravacao de .vtk: a cada iteracao')
+    else:
+        print(f'Gravacao de .vtk: a cada {vtk_interval} iteracoes (+ a ultima)')
     print('\n--------------------------------------------')
 
     mesh = read_mesh(cfg["mesh"]) # Criado um objeto Mesh para a malha utilizada
@@ -338,19 +347,24 @@ def main():
             div = torch.mm(Dx, vx.unsqueeze(1)).squeeze(1) + torch.mm(Dy, vy.unsqueeze(1)).squeeze(1)
             div_l2_hist.append(torch.sqrt(torch.mean(div**2)).item())
 
-        updated_points[:, 0] = X[:npoints].cpu().numpy()
-        updated_points[:, 1] = Y[:npoints].cpu().numpy()
+        # Grava a solucao a cada `vtk_interval` iteracoes; a ultima e' sempre
+        # gravada para que o estado final nao dependa de `Iter` ser multiplo
+        # do intervalo (e para `femns.plotting.ultimo_vtk` / o visualizador
+        # web continuarem achando o campo final).
+        if (n + 1) % vtk_interval == 0 or (n + 1) == Iter:
+            updated_points[:, 0] = X[:npoints].cpu().numpy()
+            updated_points[:, 1] = Y[:npoints].cpu().numpy()
 
-        write_vtk(
-            os.path.join(output_dir, f"solucao -{n + 1}.vtk"),
-            updated_points,
-            mesh.raw.cells,
-            point_data={
-                "vx": vx_sol.cpu().numpy(),
-                "vy": vy_sol.cpu().numpy(),
-                "p": p.cpu().numpy(),
-            },
-        )
+            write_vtk(
+                os.path.join(output_dir, f"solucao -{n + 1}.vtk"),
+                updated_points,
+                mesh.raw.cells,
+                point_data={
+                    "vx": vx_sol.cpu().numpy(),
+                    "vy": vy_sol.cpu().numpy(),
+                    "p": p.cpu().numpy(),
+                },
+            )
 
         if mp_enabled:
             X, Y, vx, vy = mover_ponto(ponto, X, Y, vx, vy, ponto_x0, ponto_y0, NToN, n * dt, amplitude_factor, omega)

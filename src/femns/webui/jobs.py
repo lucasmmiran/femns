@@ -8,6 +8,7 @@ conseguir (ou nao) parsear a barra de progresso do `tqdm` do subprocesso.
 """
 
 import glob
+import math
 import os
 import re
 import subprocess
@@ -30,6 +31,17 @@ class ConfigError(ValueError):
 def slugify(texto: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", texto.strip()).strip("-").lower()
     return slug or "sim"
+
+
+def expected_frame_count(iterations: int, vtk_interval: int) -> int:
+    """Quantos `solucao -N.vtk` a simulacao vai escrever.
+
+    `run_simulation.py` grava um a cada `vtk_interval` iteracoes e a ultima
+    sempre -- entao o ultimo "balde" parcial conta, dai o `ceil`. Usado como
+    denominador da barra de progresso (contar iteracoes daria uma barra que
+    trava em ~1/vtk_interval).
+    """
+    return math.ceil(iterations / vtk_interval)
 
 
 def validate_config(cfg: dict, meshes_root: str) -> None:
@@ -55,6 +67,9 @@ def validate_config(cfg: dict, meshes_root: str) -> None:
         raise ConfigError("simulation.dt precisa ser um numero positivo")
     if not isinstance(iterations, int) or iterations <= 0:
         raise ConfigError("simulation.iterations precisa ser um inteiro positivo")
+    vtk_interval = sim.get("vtk_interval", 10)
+    if not isinstance(vtk_interval, int) or isinstance(vtk_interval, bool) or vtk_interval <= 0:
+        raise ConfigError("simulation.vtk_interval precisa ser um inteiro positivo")
     if not isinstance(reynolds, (int, float)) or reynolds <= 0:
         raise ConfigError("simulation.reynolds precisa ser um numero positivo")
     if sim.get("advection", "eulerian") not in CAMPOS_PERMITIDOS_ADVECTION:
@@ -71,13 +86,15 @@ def validate_config(cfg: dict, meshes_root: str) -> None:
 
 class Job:
     def __init__(self, job_id: str, label: str, config_path: str, output_dir: str, log_path: str,
-                 iterations: int, process: subprocess.Popen):
+                 iterations: int, vtk_interval: int, process: subprocess.Popen):
         self.id = job_id
         self.label = label
         self.config_path = config_path
         self.output_dir = output_dir
         self.log_path = log_path
         self.iterations = iterations
+        self.vtk_interval = vtk_interval
+        self.expected_frames = expected_frame_count(iterations, vtk_interval)
         self.process = process
         self.started_at = time.time()
 
@@ -99,6 +116,8 @@ class Job:
             "status": estado,
             "returncode": returncode,
             "iterations": self.iterations,
+            "vtk_interval": self.vtk_interval,
+            "expected_frames": self.expected_frames,
             "frames_done": self.frames_done(),
             "output_dir": self.output_dir,
             "config_path": self.config_path,
@@ -168,7 +187,10 @@ class JobManager:
             start_new_session=True,
         )
 
-        job = Job(uuid.uuid4().hex[:12], label or slug, config_path, output_dir, log_path, cfg["simulation"]["iterations"], process)
+        job = Job(
+            uuid.uuid4().hex[:12], label or slug, config_path, output_dir, log_path,
+            cfg["simulation"]["iterations"], cfg["simulation"].get("vtk_interval", 10), process,
+        )
         with self._lock:
             self._jobs[job.id] = job
         return job

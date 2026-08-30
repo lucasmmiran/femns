@@ -59,6 +59,13 @@
               <button type="button" id="f-save-config" class="icon-btn icon-btn-accent" title="Salvar como template">✓</button>
             </div>
           </label>
+          <label class="field">
+            <span>Gravar .vtk a cada</span>
+            <div class="row-inline">
+              <input id="f-vtk-interval" type="number" step="1" min="1" value="10">
+              <span class="field-suffix">iterações (a última sempre)</span>
+            </div>
+          </label>
           <p class="error" id="form-error" hidden></p>
           <p class="hint" id="save-ok" hidden></p>
 
@@ -315,6 +322,16 @@
                   <option value="dotted">pontilhada</option>
                   <option value="dashdot">traço-ponto</option>
                 </select>
+              </label>
+              <label class="field-inline">Marcador
+                <select id="r-line-marker">
+                  <option value="none">nenhum</option>
+                  <option value="circle">círculo</option>
+                  <option value="triangle">triângulo</option>
+                </select>
+              </label>
+              <label class="field-inline">Nº pontos
+                <input id="r-line-marker-count" type="number" min="1" max="500" step="1" value="10" style="width:4em" disabled>
               </label>
             </div>
 

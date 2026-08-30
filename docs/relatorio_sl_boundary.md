@@ -72,8 +72,8 @@ Simulação completa (`run_simulation.py`, coluna `tempo_total_s` de
 | `dirichlet` | 0.1 | 100 | 14.56 s | 0.1365 |
 | `intercept` | 0.1 | 100 | 14.27 s | 0.1336 |
 
-Custo por passo semi-Lagrangeano isolado
-(`scripts/benchmark_sl_boundary.py`, 30 repetições):
+Custo por passo semi-Lagrangeano isolado (medido com um script de
+benchmark hoje removido, 30 repetições):
 
 | variante | ms/passo |
 |---|---|
@@ -102,14 +102,18 @@ Python nó a nó; vetorizado, esse custo já saiu do caminho crítico. O
 paralelismo que de fato importa aqui é o SIMD do numpy (todos os nós por
 operação).
 
-A via torch/GPU (`femns.semi_lagrangian_tri.SemiLagrangianMini`, que já
-implementava esta mesma interceptação) fica **mais lenta** que o numpy
-nesta malha (4.36 ms vs 2.52 ms): a caminhada tem controle de fluxo
-dependente de dado (`torch.where`, `.numel()`), que força sincronização
-host↔device a cada iteração do laço. Ela só compensaria numa malha bem
-maior, onde o trabalho por iteração amortizasse essas sincronizações.
+Houve também uma via torch/GPU do semi-Lagrangeano
+(`femns.semi_lagrangian_tri.SemiLagrangianMini`), que implementava esta
+mesma interceptação mas ficava **mais lenta** que o numpy nesta malha
+(4.36 ms vs 2.52 ms): a caminhada tem controle de fluxo dependente de
+dado (`torch.where`, `.numel()`), que força sincronização host↔device a
+cada iteração do laço. Ela só compensaria numa malha bem maior, onde o
+trabalho por iteração amortizasse essas sincronizações. Como nunca foi
+ligada ao `run_simulation.py` e o numpy vetorizado a superou aqui, esse
+módulo (e os scripts de benchmark que o comparavam) foi **removido** —
+`femns.semi_lagrangian` é a única implementação. O parágrafo fica como
+registro do porquê.
 
-> Cuidado de medição: cronometrar a via torch **sem aquecer** dá ~95 ms/passo
+> Cuidado de medição: cronometrar a via torch **sem aquecer** dava ~95 ms/passo
 > (compilação de kernel + warm-up do alocador diluídos nas repetições) —
-> 20× o valor real. `scripts/benchmark_sl_boundary.py` aquece todas as
-> variantes antes de medir.
+> 20× o valor real; o benchmark aquecia todas as variantes antes de medir.

@@ -1,6 +1,6 @@
 import pytest
 
-from femns.webui.jobs import ConfigError, slugify, validate_config
+from femns.webui.jobs import ConfigError, expected_frame_count, slugify, validate_config
 
 
 @pytest.fixture
@@ -58,6 +58,31 @@ def test_validate_config_rejeita_parametro_numerico_invalido(meshes_root, campo,
     cfg["simulation"][campo] = valor
     with pytest.raises(ConfigError):
         validate_config(cfg, meshes_root)
+
+
+@pytest.mark.parametrize("valor", [0, -1, 1.5, "10", True])
+def test_validate_config_rejeita_vtk_interval_invalido(meshes_root, valor):
+    cfg = config_valido()
+    cfg["simulation"]["vtk_interval"] = valor
+    with pytest.raises(ConfigError):
+        validate_config(cfg, meshes_root)
+
+
+def test_validate_config_aceita_sem_vtk_interval(meshes_root):
+    cfg = config_valido()
+    assert "vtk_interval" not in cfg["simulation"]
+    validate_config(cfg, meshes_root)  # opcional -- cai no default 10
+
+
+@pytest.mark.parametrize("iterations,intervalo,esperado", [
+    (1000, 10, 100),   # multiplo exato: 10, 20, ..., 1000
+    (95, 10, 10),       # 10..90 (9) + a ultima (95) = 10
+    (7, 10, 1),         # so a ultima
+    (200, 1, 200),      # todo passo
+    (1, 5, 1),
+])
+def test_expected_frame_count(iterations, intervalo, esperado):
+    assert expected_frame_count(iterations, intervalo) == esperado
 
 
 @pytest.mark.parametrize("campo,valor", [("advection", "bogus"), ("element", "bogus"), ("sl_boundary", "bogus")])

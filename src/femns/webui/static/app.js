@@ -375,6 +375,9 @@ const NovaSimulacao = (() => {
     if (sim.dt != null) document.getElementById("f-dt").value = sim.dt;
     if (sim.iterations != null) document.getElementById("f-iterations").value = sim.iterations;
     if (sim.reynolds != null) document.getElementById("f-reynolds").value = sim.reynolds;
+    // config antigo sem a chave: volta pro padrao 10 (mesmo default de
+    // run_simulation.py/jobs.py), nao mantem o que estava no campo.
+    document.getElementById("f-vtk-interval").value = sim.vtk_interval ?? 10;
     // "explicit" e o nome antigo de "eulerian" (ver run_simulation.py) --
     // normaliza aqui pra templates salvos antes da renomeacao continuarem
     // carregando certo em vez de deixar o select sem nenhuma opcao valida.
@@ -518,6 +521,7 @@ const NovaSimulacao = (() => {
         advection: document.getElementById("f-advection").value,
         element: document.getElementById("f-element").value,
         sl_boundary: document.getElementById("f-sl-boundary").value,
+        vtk_interval: parseInt(document.getElementById("f-vtk-interval").value, 10),
       },
       boundary: {
         priority: boundaryOrder,
@@ -567,14 +571,19 @@ const NovaSimulacao = (() => {
   // -- lista de simulacoes lancadas ---------------------------------------
 
   function jobCard(job) {
-    const pct = job.iterations ? Math.min(100, Math.round((100 * job.frames_done) / job.iterations)) : 0;
+    // denominador = quadros que a simulacao vai escrever (um a cada
+    // vtk_interval + o ultimo), nao o total de iteracoes -- senao a barra
+    // travaria em ~1/vtk_interval. `expected_frames` vem do backend; o
+    // fallback cobre jobs de antes dessa mudanca.
+    const alvoQuadros = job.expected_frames || job.iterations;
+    const pct = alvoQuadros ? Math.min(100, Math.round((100 * job.frames_done) / alvoQuadros)) : 0;
     const card = el("div", { class: "job-card" }, [
       el("div", { class: "job-head" }, [
         el("span", { class: "job-title", text: job.label }),
         el("span", { class: `status ${job.status}`, text: job.status }),
       ]),
       el("div", { class: "bar" }, [el("div", { class: "bar-fill", style: `width:${pct}%` })]),
-      el("div", { text: `${job.frames_done} / ${job.iterations} quadros` }),
+      el("div", { text: `${job.frames_done} / ${alvoQuadros} quadros` }),
       el("pre", { text: job.log_tail || "" }),
     ]);
     if (job.status === "running") {
@@ -657,13 +666,15 @@ const Resultados = (() => {
   const OVERLAY_PALETTE = ["#f5a623", "#4caf7d", "#c77dff", "#f472b6", "#2dd4bf", "#a3e635", "#ff6b6b"];
   // estilo (cor + tracado) da linha "ao vivo" (a que segue o quadro atual,
   // em oposicao as plotagens salvas carregadas de arquivo em savedOverlays).
-  let liveLineStyle = { color: "#4f8cff", dash: "solid" };
+  let liveLineStyle = { color: "#4f8cff", dash: "solid", marker: "none", markerCount: 10 };
   const LINE_DASH_STYLES = {
     solid: { label: "sólida", pattern: [] },
     dashed: { label: "tracejada", pattern: [8, 4] },
     dotted: { label: "pontilhada", pattern: [2, 3] },
     dashdot: { label: "traço-ponto", pattern: [8, 3, 2, 3] },
   };
+  const MARKER_SHAPES = ["none", "circle", "triangle"];
+  const MARKER_LABELS = { none: "nenhum", circle: "círculo", triangle: "triângulo" };
 
   function jetColor(t) {
     t = Math.min(1, Math.max(0, t));
@@ -1030,6 +1041,22 @@ const Resultados = (() => {
     };
   }
 
+  function drawMarker(lctx, shape, px, py, size, color) {
+    lctx.fillStyle = color;
+    if (shape === "circle") {
+      lctx.beginPath();
+      lctx.arc(px, py, size, 0, Math.PI * 2);
+      lctx.fill();
+    } else if (shape === "triangle") {
+      lctx.beginPath();
+      lctx.moveTo(px, py - size * 1.1);
+      lctx.lineTo(px - size, py + size * 0.75);
+      lctx.lineTo(px + size, py + size * 0.75);
+      lctx.closePath();
+      lctx.fill();
+    }
+  }
+
   // `series`: [{name, campo, color, dash, samples: [{dist,value|null}], length}]
   // Desenha em `canvasId` -- usado tanto pro grafico principal
   // (r-line-canvas: linha atual + plotagens carregadas) quanto pro grafico
@@ -1145,6 +1172,35 @@ const Resultados = (() => {
     lctx.setLineDash([]);
     lctx.restore();
 
+    // marcadores (circulo/triangulo): N posicoes igualmente espacadas no
+    // intervalo de dados da PROPRIA serie (nao do eixo do grafico, que pode
+    // estar com limite manual mais estreito), com o valor interpolado
+    // linearmente entre os dois pontos reais mais proximos -- mesma
+    // interpolarEm ja usada pro erro relativo.
+    lctx.save();
+    lctx.beginPath();
+    lctx.rect(padLeft, padTop, w, h);
+    lctx.clip();
+    for (const s of series) {
+      if (!s.marker || s.marker === "none" || !(s.markerCount > 0)) continue;
+      const validos = s.samples.filter((p) => p.value !== null);
+      if (!validos.length) continue;
+      const coords = validos.map(coordOf);
+      const cMin = Math.min(...coords), cMax = Math.max(...coords);
+      const n = Math.max(1, Math.round(s.markerCount));
+      for (let i = 0; i < n; i++) {
+        const t = n === 1 ? 0.5 : i / (n - 1);
+        const target = cMin + (cMax - cMin) * t;
+        const v = interpolarEm(s.samples, coordOf, target);
+        if (v === null) continue;
+        const synthetic = { value: v };
+        synthetic[coordKey === "dist" ? "dist" : coordKey] = target;
+        const px = toX(horizOf(synthetic)), py = toY(vertOf(synthetic));
+        drawMarker(lctx, s.marker, px, py, 4, s.color);
+      }
+    }
+    lctx.restore();
+
     // legenda: amostra da linha (cor + tracado) + "nome (campo)" por serie,
     // numa linha abaixo dos rotulos do eixo horizontal.
     let lx = padLeft;
@@ -1185,7 +1241,9 @@ const Resultados = (() => {
       const name = document.getElementById("r-line-name").value.trim() || "atual";
       liveSeries = {
         name, campo: campo === "mag" ? "|v|" : campo,
-        color: liveLineStyle.color, dash: liveLineStyle.dash, samples, length,
+        color: liveLineStyle.color, dash: liveLineStyle.dash,
+        marker: liveLineStyle.marker, markerCount: liveLineStyle.markerCount,
+        samples, length,
       };
       series.push(liveSeries);
     }
@@ -1235,9 +1293,29 @@ const Resultados = (() => {
       dashSelect.value = ov.dash || "solid";
       dashSelect.addEventListener("change", () => { ov.dash = dashSelect.value; rerender(); });
 
+      const markerSelect = el(
+        "select",
+        { class: "overlay-marker", title: "Marcador" },
+        MARKER_SHAPES.map((value) => el("option", { value, text: MARKER_LABELS[value] })),
+      );
+      markerSelect.value = ov.marker || "none";
+      markerSelect.addEventListener("change", () => { ov.marker = markerSelect.value; rerender(); });
+
+      const markerCountInput = el("input", {
+        type: "number", min: "1", max: "500", step: "1",
+        value: String(ov.markerCount || 10), class: "overlay-marker-count", title: "Número de pontos marcados",
+      });
+      markerCountInput.addEventListener("input", () => {
+        const n = parseInt(markerCountInput.value, 10);
+        ov.markerCount = Number.isFinite(n) && n > 0 ? n : 10;
+        rerender();
+      });
+
       ul.appendChild(el("li", { class: "overlay-chip" }, [
         colorInput,
         dashSelect,
+        markerSelect,
+        markerCountInput,
         el("span", { class: "name", text: `${ov.name} (${ov.campo})` }),
         el("button", {
           type: "button",
@@ -1418,6 +1496,16 @@ const Resultados = (() => {
       liveLineStyle.dash = e.target.value;
       rerender();
     });
+    document.getElementById("r-line-marker").addEventListener("change", (e) => {
+      liveLineStyle.marker = e.target.value;
+      document.getElementById("r-line-marker-count").disabled = e.target.value === "none";
+      rerender();
+    });
+    document.getElementById("r-line-marker-count").addEventListener("input", (e) => {
+      const n = parseInt(e.target.value, 10);
+      liveLineStyle.markerCount = Number.isFinite(n) && n > 0 ? n : 10;
+      rerender();
+    });
 
     // -- salvar/carregar plotagens em arquivo .json --------------------
     document.getElementById("r-line-save").addEventListener("click", async () => {
@@ -1434,6 +1522,8 @@ const Resultados = (() => {
         campo: campo === "mag" ? "|v|" : campo,
         color: liveLineStyle.color,
         dash: liveLineStyle.dash,
+        marker: liveLineStyle.marker,
+        marker_count: liveLineStyle.markerCount,
         line: { ...line },
         length,
         samples,
@@ -1455,15 +1545,20 @@ const Resultados = (() => {
         const data = JSON.parse(await file.text());
         if (!Array.isArray(data.samples)) throw new Error("arquivo sem 'samples' -- não é uma plotagem salva pelo femns");
         // cor/estilo do proprio arquivo, se foi salvo por uma versao que ja
-        // gravava isso -- senao cai no palete automatico + solida de sempre.
+        // gravava isso -- senao cai no palete automatico + solida/sem
+        // marcador de sempre.
         const color = data.color || OVERLAY_PALETTE[savedOverlays.length % OVERLAY_PALETTE.length];
         const dash = data.dash && LINE_DASH_STYLES[data.dash] ? data.dash : "solid";
+        const marker = MARKER_SHAPES.includes(data.marker) ? data.marker : "none";
+        const markerCount = Number.isFinite(data.marker_count) && data.marker_count > 0 ? data.marker_count : 10;
         const length = data.length ?? (data.samples.length ? data.samples[data.samples.length - 1].dist : 0);
         savedOverlays.push({
           name: data.name || file.name.replace(/\.json$/i, ""),
           campo: data.campo || "?",
           color,
           dash,
+          marker,
+          markerCount,
           samples: data.samples,
           length,
         });

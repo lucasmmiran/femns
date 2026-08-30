@@ -8,6 +8,7 @@ simulation:
   reynolds: 1
   advection: eulerian  # eulerian (padrao) ou semi_lagrangian
   element: mini  # mini (padrao, hoje) ou tri6
+  vtk_interval: 10  # grava 1 .vtk a cada N iteracoes (padrao 10); a ultima e' sempre gravada
 
 boundary:
   # Ordem de prioridade dos contornos, da mais baixa para a mais alta.

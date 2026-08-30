@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instala dependencias (torch CPU-only, sem CUDA)
+        run: |
+          python -m pip install --upgrade pip
+          # o wheel padrao do torch traz CUDA (~2.5 GB); o runner nao tem GPU
+          # e a suite roda toda em CPU, entao o wheel CPU-only e mais rapido.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev,test]"
+
+      - name: ruff
+        run: ruff check src scripts tests
+
+      - name: pytest
+        run: pytest -q

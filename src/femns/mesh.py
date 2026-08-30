@@ -187,7 +187,8 @@ def area_com_sinal(IEN, X, Y):
     `abs()` da area, mas os coeficientes `bi, ci` sao calculados sem
     `abs`, entao um elemento de orientacao trocada entra no sistema com
     `Gx`/`Gy` de sinal errado -- silenciosamente. A convencao do projeto
-    e' `IEN[e, 0:3]` sempre anti-horario (ver `semi_lagrangian_tri`).
+    e' `IEN[e, 0:3]` sempre anti-horario (a busca por caminhada de
+    `semi_lagrangian.calculo_sl` tambem assume isso).
 
     Funciona com `torch` ou `numpy`.
     """

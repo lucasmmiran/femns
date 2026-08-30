@@ -22,7 +22,7 @@ velocidade — vértices + nó de aresta —, P1 para pressão).
 │   ├── mesh.py              # leitura da malha, conectividade (NToN/EToE), elementos MINI e Tri6
 │   ├── assembly.py          # montagem vetorizada das matrizes de elemento (K, M, Gx, Gy, Gvx, Gvy)
 │   ├── boundary.py          # condições de contorno: nomes por nó, valores, aplicação na matriz
-│   ├── moving_mesh.py        # deslocamento senoidal de um nó (experimento de malha móvel)
+│   ├── moving_mesh.py        # malha móvel: órbita de um nó (moving_point) ou oscilação de todos os nós interiores (mesh_motion) + velocidade da malha para a correção ALE
 │   ├── solver.py             # montagem do sistema global e passo de tempo (Euler implícito)
 │   ├── io.py                 # escrita dos resultados em VTK
 │   ├── plotting.py           # imagens (PNG) da distribuição espacial das variáveis
@@ -52,7 +52,7 @@ nós sem precisar de uma malha `.msh` nem rodar a simulação inteira.
 | `mesh.py` | lê `.msh`, monta elemento MINI (nó de centroide) ou Tri6 (nós de aresta, deduplicados entre elementos vizinhos), conectividade nó-a-nó (`NToN`) e elemento-a-elemento (`EToE`) | não sabe de condição de contorno nem de matrizes de rigidez |
 | `assembly.py` | monta `K, M, Gx, Gy, Gvx, Gvy` (rigidez, massa, gradiente) por elemento, vetorizado em `torch` | não monta o sistema global nem aplica contorno |
 | `boundary.py` | resolve qual nome de contorno cada nó tem (por prioridade) e monta os índices/valores de Dirichlet; zera linhas da matriz global e põe 1 na diagonal | não decide *quais* são os valores físicos — isso vem do config |
-| `moving_mesh.py` | desloca um nó da malha em trajetória senoidal e reinterpola sua velocidade a partir dos vizinhos (IDW) | não atualiza a malha inteira, só o nó indicado |
+| `moving_mesh.py` | move a malha: um nó em órbita (`moving_point`, com reinterpolação IDW da velocidade dele) ou **todos os nós interiores** oscilando ao longo de retas próprias (`mesh_motion`); também fornece a velocidade da malha (derivada analítica) para a correção ALE | não remonta o sistema (isso é do script, que remonta a cada passo quando `mesh_motion` está ligado) |
 | `solver.py` | monta a matriz de bloco global (vx, vy, p) e resolve um passo de tempo | não conhece a malha nem faz I/O |
 | `io.py` | escreve pontos/células/campos em `.vtk` via `meshio` | não decide nomes de arquivo/diretório de saída (isso é do script) |
 | `plotting.py` | plota `vx`, `vy`, `p` e `\|v\|` sobre a malha triangular (`matplotlib`) e salva em PNG | não sabe achar o `.vtk` da última iteração nem ler o config (isso é do script) |
@@ -111,6 +111,7 @@ simulation:
   advection: eulerian  # eulerian (padrao) ou semi_lagrangian
   sl_boundary: intercept  # intercept (padrao) ou dirichlet -- so vale com semi_lagrangian
   element: mini  # mini (padrao) ou tri6
+  vtk_interval: 10  # grava 1 .vtk a cada N iteracoes (padrao 10); a ultima e' sempre gravada
 
 boundary:
   priority: [outlet, inlet, top, bottom]   # do menor para o maior prioridade
@@ -232,8 +233,9 @@ benchmark_xlsx: solucoes/benchmarks.xlsx
   `semi_lagrangian` usa backtrace + interpolação no pé da
   característica (`femns.semi_lagrangian`) em vez disso, sem essa
   restrição de `dt`, ao custo de alguma difusão numérica adicional e
-  de rodar mais devagar por passo (a busca do elemento ainda não é
-  vetorizada — ver `docs/semi_lagrangian_strategy.pdf`).
+  de rodar mais devagar por passo (ver `docs/semi_lagrangian_strategy.pdf`).
+  A busca por elemento é vetorizada (caminhada em paralelo entre nós via
+  máscara booleana); numa malha real de 8161 nós ela custa ~1,7 ms.
 - **`simulation.sl_boundary`**: o que fazer quando o pé da característica
   cai **fora da malha** (só tem efeito com `advection: semi_lagrangian`).
   `dirichlet` usa o valor de Dirichlet do contorno *do próprio nó
@@ -256,13 +258,21 @@ benchmark_xlsx: solucoes/benchmarks.xlsx
   nos dois casos — o Tri6 não é caso especial no solver. A referência
   em `referencia/ref tri6/` também define uma variante "slip" do
   gradiente que **não** é usada aqui: ela quebra essa simetria e faz o
-  BiCGSTAB divergir (ver `femns.assembly.assemble_tri6`). Ainda não
-  combina com `advection: semi_lagrangian` (a interpolação de
-  `femns.semi_lagrangian` é específica do MINI).
+  BiCGSTAB divergir (ver `femns.assembly.assemble_tri6`). Combina com
+  `advection: semi_lagrangian` — a interpolação no pé da característica
+  usa a base P2 completa (`interpolar_tri6`), validada contra campo
+  quadrático arbitrário (ver `docs/semi_lagrangian_tri6.md`).
+- **`simulation.vtk_interval`**: grava um `solucao -N.vtk` a cada `N`
+  iterações (padrão `10`). A **última** iteração é sempre gravada, então
+  o estado final não depende de `iterations` ser múltiplo do intervalo,
+  e `femns.plotting.ultimo_vtk` / o visualizador web continuam achando o
+  campo final. `vtk_interval: 1` grava todo passo (comportamento
+  anterior). Não afeta a numérica — só a densidade de frames no disco e
+  o custo de I/O em runs longos.
 
 Para testar rápido, copie o config e reduza `iterations` (ex.: 5) antes
-de apontar `--config` para a cópia — os `.vtk` de uma malha grande levam
-alguns segundos por iteração no solve denso atual (ver limitação abaixo).
+de apontar `--config` para a cópia — cada iteração numa malha grande
+custa alguns segundos (BiCGSTAB no sistema de sela + escrita do `.vtk`).
 
 ## Testes
 
@@ -273,8 +283,16 @@ python -m pytest tests/ -v
 Os testes cobrem conectividade de malha (`NToN`/`EToE`), montagem dos
 elementos MINI e Tri6 contra valores analíticos (calculados à mão e/ou
 verificados por integração simbólica exata com `sympy`) para um
-triângulo de referência, e resolução de prioridade/condições de
-contorno — nenhum depende de arquivo `.msh` nem de GPU.
+triângulo de referência e para dois elementos partilhando um nó
+(acumulação da montagem vetorizada), e resolução de prioridade/condições
+de contorno — nenhum depende de arquivo `.msh` nem de GPU.
+
+`ruff check src scripts tests` roda o linter (config em `pyproject.toml`;
+`referencia/` fica de fora, é código do professor verbatim).
+
+`.github/workflows/ci.yml` roda `ruff` + `pytest` a cada `push`/PR no
+GitHub (Ubuntu, Python 3.12, `torch` CPU-only) — a suíte inteira em
+CPU, sem simulação de verdade.
 
 ## Interface web (GUI opcional)
 
@@ -305,7 +323,9 @@ Duas telas:
 
 - **Nova simulação**: escolhe a malha (lê os nomes de contorno reais do
   `.msh`, físical groups do Gmsh, via `femns.webui.meshes`), preenche
-  `dt`/`iterations`/`reynolds`/`advection`/`element`/`sl_boundary`,
+  `dt`/`iterations`/`reynolds`/`advection`/`element`/`sl_boundary` e o
+  intervalo de gravação de `.vtk` (campo "Gravar .vtk a cada" na área de
+  template, logo abaixo do rótulo — `simulation.vtk_interval`, padrão 10),
   monta `boundary.priority`/`boundary.conditions` num editor (reordenar
   prioridade, marcar `vx`/`vy`/`p` por contorno) — com um seletor de
   template que pré-preenche tudo a partir de um `configs/*.yaml`
@@ -318,8 +338,9 @@ Duas telas:
   guardar um rascunho incompleto); só "Rodar simulação" valida de fato.
   "Rodar simulação" grava um config novo em `configs/gui/` e lança
   `scripts/run_simulation.py` como subprocesso
-  (`femns.webui.jobs`); a tela acompanha progresso (contagem de
-  `solucao -N.vtk` escritos) e log em tempo real, com botão de cancelar.
+  (`femns.webui.jobs`); a tela acompanha progresso (quadros
+  `solucao -N.vtk` escritos vs. os esperados, `⌈iterations/vtk_interval⌉`)
+  e log em tempo real, com botão de cancelar.
   Saída em `solucoes/gui/<rótulo>-<timestamp>/` (git-ignorado, mesmo
   tratamento do resto de `solucoes/`). O editor de condição de contorno
   só cobre valores numéricos uniformes — condição com perfil (ex.
@@ -405,13 +426,18 @@ pedido.
 
 - Sem suporte a outras geometrias além de malhas triangulares (MINI ou
   Tri6; sem elementos quadrilaterais).
-- Tri6 ainda não tem gerador de malha para as demais combinações
-  experimentais (`moving_point` não foi testado com Tri6; `advection:
-  semi_lagrangian` não é suportado com `element: tri6`, ver seção
-  "Config").
-- `moving_mesh.py` move um único nó como experimento pontual; não é um
-  esquema de malha móvel/ALE completo (não remonta a malha a partir do
-  deslocamento).
+- `moving_point` (órbita de um nó) não foi testado com `element: tri6` —
+  só com MINI. `advection: semi_lagrangian` está validado com os dois
+  elementos; `mesh_motion` tem o caminho de código para os dois (nós
+  extras recalculados dos vértices) mas só foi exercitado com MINI.
+- Elementos com orientação horária não são tratados de forma robusta
+  (as malhas do projeto têm zero; `assembly` toma `abs` da área mas não
+  dos coeficientes `bi`/`ci`). Com `mesh_motion` ligado isso deixa de
+  ser hipotético — daí o aborto por inversão de elemento a cada passo.
+- A oscilação de `mesh_motion` é sintética (fase/direção aleatórias por
+  nó) — um experimento de robustez da malha móvel/ALE, não um caso de
+  uso. Falta um esquema movido por deslocamento físico real (o projeto
+  de mestrado descreve uma válvula fechando).
 - `tol`/`max_iter` do BiCGSTAB estão com valores padrão fixos em
   `time_step` (`1e-8`/`2000`), não expostos no config yaml — ajustar
   diretamente no código se uma malha maior precisar de outros valores.

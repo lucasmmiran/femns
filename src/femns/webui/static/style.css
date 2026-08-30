@@ -156,6 +156,8 @@ main { padding: 1.4rem 1.5rem 3rem; }
 .row-inline { display: flex; gap: 0.4rem; align-items: stretch; }
 .row-inline select { flex: 1; min-width: 0; }
 .row-inline button { flex: none; padding: 0.4rem 0.55rem; }
+.row-inline input { flex: 1; min-width: 0; }
+.field-suffix { flex: none; align-self: center; color: var(--muted); font-size: 0.78rem; }
 
 input, select {
   background: var(--bg);
@@ -385,12 +387,13 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .overlay-chip .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .overlay-chip button { padding: 0.1rem 0.4rem; font-size: 0.7rem; flex: none; }
 .overlay-chip .overlay-color { width: 1.4rem; height: 1.1rem; padding: 0; border-radius: 1px; flex: none; }
-.overlay-chip .overlay-dash {
+.overlay-chip .overlay-dash, .overlay-chip .overlay-marker {
   flex: none;
   padding: 0.1rem 0.25rem;
   font-family: var(--font-mono);
   font-size: 0.68rem;
 }
+.overlay-chip .overlay-marker-count { flex: none; width: 3em; padding: 0.1rem 0.25rem; font-family: var(--font-mono); font-size: 0.68rem; }
 
 .line-plot-panel { margin-top: 1rem; }
 .line-plot-header { display: flex; justify-content: space-between; align-items: baseline; gap: 0.6rem; margin-bottom: 0.4rem; }
