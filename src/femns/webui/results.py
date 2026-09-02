@@ -78,6 +78,10 @@ def read_meta(run_dir: str) -> dict:
         "nframes": len(numeros),
         "first_frame": numeros[0],
         "last_frame": numeros[-1],
+        # lista dos numeros de frame REAIS -- com `vtk_interval > 1` eles nao
+        # sao contiguos (ex.: 20, 40, ..., 1000), entao o cliente nao pode
+        # reconstruir o intervalo por conta propria.
+        "frames": numeros,
         "fields": campos,
         "bbox": [float(x.min()), float(y.min()), float(x.max()), float(y.max())],
         "npoints": int(malha.points.shape[0]),

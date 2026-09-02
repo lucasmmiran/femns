@@ -64,6 +64,7 @@ def test_read_meta(tmp_path):
     assert meta["nframes"] == 3
     assert meta["first_frame"] == 5
     assert meta["last_frame"] == 15
+    assert meta["frames"] == [5, 10, 15]
     assert meta["fields"] == ["vx", "vy", "p"]
     assert meta["npoints"] == 4
     assert meta["bbox"] == [0.0, 0.0, 1.0, 1.0]

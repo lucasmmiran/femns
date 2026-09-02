@@ -1151,10 +1151,19 @@ const Resultados = (() => {
 
     // recorta pro retangulo do grafico -- com eixos manuais mais estreitos
     // que os dados, a linha nao pode vazar por cima dos rotulos/legenda.
+    // A folga (CLIP_SLACK) evita que a espessura do traco e os marcadores
+    // fiquem cortados pela metade quando um ponto cai exatamente na borda
+    // (tipico no modo automatico: o maximo/minimo dos dados encosta no topo
+    // ou na base do retangulo) -- ainda longe o bastante dos rotulos.
+    const CLIP_SLACK = 7;
+    const clipPlot = () => {
+      lctx.beginPath();
+      lctx.rect(padLeft - CLIP_SLACK, padTop - CLIP_SLACK,
+                w + 2 * CLIP_SLACK, h + 2 * CLIP_SLACK);
+      lctx.clip();
+    };
     lctx.save();
-    lctx.beginPath();
-    lctx.rect(padLeft, padTop, w, h);
-    lctx.clip();
+    clipPlot();
     for (const s of series) {
       lctx.strokeStyle = s.color;
       lctx.lineWidth = 2;
@@ -1178,9 +1187,7 @@ const Resultados = (() => {
     // linearmente entre os dois pontos reais mais proximos -- mesma
     // interpolarEm ja usada pro erro relativo.
     lctx.save();
-    lctx.beginPath();
-    lctx.rect(padLeft, padTop, w, h);
-    lctx.clip();
+    clipPlot();
     for (const s of series) {
       if (!s.marker || s.marker === "none" || !(s.markerCount > 0)) continue;
       const validos = s.samples.filter((p) => p.value !== null);
@@ -1742,7 +1749,18 @@ const Resultados = (() => {
     const step = async () => {
       if (!playing) return;
       if (frameIdx >= frameNumbers.length - 1) { stopPlay(); return; }
-      await showFrameAt(frameIdx + 1);
+      // sem o try/catch, um quadro que falha rejeita esta promise, o timer
+      // nunca e' reagendado e `playing` fica true: a reproducao para com o
+      // botao ainda em "⏸", parecendo travada e sem dizer o motivo.
+      try {
+        await showFrameAt(frameIdx + 1);
+      } catch (e) {
+        stopPlay();
+        const hint = document.getElementById("r-line-hint");
+        hint.hidden = false;
+        hint.textContent = `Erro ao ler o quadro ${frameNumbers[frameIdx + 1]}: ${e.message || e}`;
+        return;
+      }
       const fps = Math.max(1, parseFloat(document.getElementById("r-fps").value) || 12);
       playTimer = setTimeout(step, 1000 / fps);
     };
@@ -1755,8 +1773,10 @@ const Resultados = (() => {
     stopDrawingLine();
     clearLine(); // linha desenhada sobre a geometria antiga nao faz sentido pra nova simulacao
     currentRun = { id: runId, meta: await api(`/api/results/${runId}/meta`) };
-    frameNumbers = [];
-    for (let n = currentRun.meta.first_frame; n <= currentRun.meta.last_frame; n++) frameNumbers.push(n);
+    // numeros de frame REAIS vindos do servidor -- com `vtk_interval > 1` eles
+    // sao esparsos (ex.: 20, 40, ..., 1000); reconstruir o intervalo aqui
+    // pedia frames inexistentes e travava o play no 2o quadro.
+    frameNumbers = currentRun.meta.frames.slice();
     frameCache.clear();
     document.getElementById("r-slider").max = frameNumbers.length - 1;
     loadedForRun = runId;
