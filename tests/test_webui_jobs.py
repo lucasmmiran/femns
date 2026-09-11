@@ -93,6 +93,26 @@ def test_validate_config_rejeita_enum_invalido(meshes_root, campo, valor):
         validate_config(cfg, meshes_root)
 
 
+def test_validate_config_aceita_bloco_solver(meshes_root):
+    cfg = config_valido()
+    cfg["simulation"]["solver"] = {"tol": 1e-6, "max_iter": 500}
+    validate_config(cfg, meshes_root)  # nao deve levantar
+
+
+@pytest.mark.parametrize("solver", [
+    {"tol": 0},
+    {"tol": "1e-8"},
+    {"max_iter": -1},
+    {"max_iter": 1.5},
+    {"precond": "jacobi"},
+])
+def test_validate_config_rejeita_bloco_solver_invalido(meshes_root, solver):
+    cfg = config_valido()
+    cfg["simulation"]["solver"] = solver
+    with pytest.raises(ConfigError):
+        validate_config(cfg, meshes_root)
+
+
 def test_validate_config_rejeita_boundary_ausente(meshes_root):
     cfg = config_valido()
     cfg["boundary"] = {}

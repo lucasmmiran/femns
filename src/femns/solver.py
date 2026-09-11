@@ -109,13 +109,19 @@ def time_step(A: torch.Tensor, M: torch.Tensor, Gvx: torch.Tensor, Gvy: torch.Te
         cx = vx if wx is None else vx - wx
         cy = vy if wy is None else vy - wy
 
-        vx_diag = torch.diag(cx).to_sparse_csr()
-        vy_diag = torch.diag(cy).to_sparse_csr()
+        # O termo convectivo linearizado e' `vg @ w`, com
+        # `vg = diag(cx) Gvx + diag(cy) Gvy`. Aplicado a um vetor:
+        #     vg @ w == cx (.) (Gvx @ w) + cy (.) (Gvy @ w)
+        # -- calculado direto, sem materializar `diag(cx)` densa n x n
+        # (era O(n^2) de VRAM por passo; ver plano de 2026-09-07). Resultado
+        # algebricamente identico ao `torch.mm(vg, w)` anterior.
+        cx1, cy1 = cx.unsqueeze(1), cy.unsqueeze(1)
 
-        vg = torch.mm(vx_diag, Gvx) + torch.mm(vy_diag, Gvy)
+        def _vg_mv(w1):
+            return cx1 * torch.mm(Gvx, w1) + cy1 * torch.mm(Gvy, w1)
 
-        b_sup = (1 / dt) * torch.mm(M, vx.unsqueeze(1)) - torch.mm(vg, vx.unsqueeze(1))
-        b_mid = (1 / dt) * torch.mm(M, vy.unsqueeze(1)) - torch.mm(vg, vy.unsqueeze(1))
+        b_sup = (1 / dt) * torch.mm(M, vx.unsqueeze(1)) - _vg_mv(vx.unsqueeze(1))
+        b_mid = (1 / dt) * torch.mm(M, vy.unsqueeze(1)) - _vg_mv(vy.unsqueeze(1))
 
     b_inf = torch.zeros(npoints, dtype=vx.dtype, device=vx.device)
 

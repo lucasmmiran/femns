@@ -1,0 +1,123 @@
+{
+  "name": "cavidade-Re100-ghia-vy",
+  "campo": "vy",
+  "color": "#c77dff",
+  "dash": "dashed",
+  "marker": "circle",
+  "marker_count": 17,
+  "line": {
+    "x1": 0.0,
+    "y1": 0.5,
+    "x2": 1.0,
+    "y2": 0.5
+  },
+  "length": 1.0,
+  "samples": [
+    {
+      "dist": 0.0,
+      "x": 0.0,
+      "y": 0.5,
+      "value": 0.0
+    },
+    {
+      "dist": 0.0625,
+      "x": 0.0625,
+      "y": 0.5,
+      "value": 0.09233
+    },
+    {
+      "dist": 0.0703,
+      "x": 0.0703,
+      "y": 0.5,
+      "value": 0.10091
+    },
+    {
+      "dist": 0.0781,
+      "x": 0.0781,
+      "y": 0.5,
+      "value": 0.1089
+    },
+    {
+      "dist": 0.0938,
+      "x": 0.0938,
+      "y": 0.5,
+      "value": 0.12317
+    },
+    {
+      "dist": 0.1563,
+      "x": 0.1563,
+      "y": 0.5,
+      "value": 0.16077
+    },
+    {
+      "dist": 0.2266,
+      "x": 0.2266,
+      "y": 0.5,
+      "value": 0.17507
+    },
+    {
+      "dist": 0.2344,
+      "x": 0.2344,
+      "y": 0.5,
+      "value": 0.17527
+    },
+    {
+      "dist": 0.5,
+      "x": 0.5,
+      "y": 0.5,
+      "value": 0.05454
+    },
+    {
+      "dist": 0.8047,
+      "x": 0.8047,
+      "y": 0.5,
+      "value": -0.24533
+    },
+    {
+      "dist": 0.8594,
+      "x": 0.8594,
+      "y": 0.5,
+      "value": -0.22445
+    },
+    {
+      "dist": 0.9063,
+      "x": 0.9063,
+      "y": 0.5,
+      "value": -0.16914
+    },
+    {
+      "dist": 0.9453,
+      "x": 0.9453,
+      "y": 0.5,
+      "value": -0.10313
+    },
+    {
+      "dist": 0.9531,
+      "x": 0.9531,
+      "y": 0.5,
+      "value": -0.08864
+    },
+    {
+      "dist": 0.9609,
+      "x": 0.9609,
+      "y": 0.5,
+      "value": -0.07391
+    },
+    {
+      "dist": 0.9688,
+      "x": 0.9688,
+      "y": 0.5,
+      "value": -0.05906
+    },
+    {
+      "dist": 1.0,
+      "x": 1.0,
+      "y": 0.5,
+      "value": 0.0
+    }
+  ],
+  "run_label": "Ghia, Ghia & Shin (1982), Re=100 -- v na linha central horizontal",
+  "frame": null,
+  "saved_at": "2026-09-07T17:27:13.477718+00:00",
+  "fonte": "U. Ghia, K. N. Ghia, C. T. Shin, \"High-Re solutions for incompressible flow using the Navier-Stokes equations and a multigrid method\", Journal of Computational Physics 48(3):387-411, 1982 -- Tabela II (v-velocity ao longo da linha horizontal pelo centro geometrico da cavidade). Cavidade unitaria [0,1]x[0,1], tampa deslizante com velocidade 1, Re=100. A linha central horizontal e' y=0.5, x de 0 a 1; 'dist' ao longo da linha == x. Coordenadas ja batem com meshes/lid.msh (quadrado unitario), sem conversao (ao contrario dos arquivos do degrau). 'v' do artigo mapeado para 'vy' (componente vertical da velocidade) na convencao do femns. Valores tabelados no artigo em x decrescente; aqui reordenados em x crescente. Par para comparar: 'u' na linha vertical (Tabela I) mapeia para 'vx'."
+}

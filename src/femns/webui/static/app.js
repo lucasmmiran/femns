@@ -28,10 +28,23 @@
 // utilidades
 // ---------------------------------------------------------------------
 
+// Token de acesso: quando o servidor exige (variavel FEMNS_GUI_TOKEN
+// setada, ver README "Interface web"), a URL de abertura traz ?token=...;
+// guardamos daqui e mandamos em `Authorization: Bearer` em toda chamada de
+// /api. Sem token no servidor, isso fica vazio e nada muda.
+const AUTH_TOKEN = new URLSearchParams(location.search).get("token") || "";
+
 async function api(path, opts) {
+  opts = opts || {};
+  if (AUTH_TOKEN) {
+    opts.headers = { ...(opts.headers || {}), Authorization: `Bearer ${AUTH_TOKEN}` };
+  }
   const res = await fetch(path, opts);
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!res.ok) {
+    if (res.status === 401) throw new Error(data.error || "não autorizado — token ausente ou inválido (?token=… na URL)");
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
   return data;
 }
 
@@ -230,36 +243,50 @@ const NovaSimulacao = (() => {
     });
   }
 
-  // Cada componente (vx/vy/p) de um contorno pode ser um valor constante
-  // (input numerico normal) ou uma expressao Python de y absoluto (ex.
-  // "4*y*(1-y)", ver boundary.funcao_de_y) -- o botao fn-toggle alterna
-  // entre os dois. O modo atual fica em `label.dataset.mode` ("const",
-  // default, ou "func"); `.comp-value` identifica o input de valor
-  // independente do `type` atual (que muda entre number/text).
+  // Cada componente (vx/vy/p) de um contorno pode ser, conforme o seletor
+  // `.comp-mode`:
+  //   - "const": valor numerico uniforme (input number)
+  //   - "func" : expressao Python de y absoluto (ex. "4*y*(1-y)", ver
+  //              boundary.funcao_de_y) -- input vira text
+  //   - "parab": perfil parabolico {perfil: parabolico, vmax: ...}, ancorado
+  //              na extensao geometrica do contorno (ver boundary.perfil_parabolico)
+  //              -- o input number passa a valer o vmax
+  // O modo atual fica em `label.dataset.mode`; `.comp-value` identifica o
+  // input de valor independente do `type`/significado atual.
+  const COMP_MODOS = [["const", "núm"], ["func", "ƒ(y)"], ["parab", "parábola"]];
+
   function comp(boundaryName, campo) {
     const cb = el("input", { type: "checkbox", "data-comp": campo });
     const num = el("input", {
       type: "number", step: "any", value: "0", disabled: "disabled", class: "comp-value",
     });
-    const fnBtn = el("button", {
-      type: "button", class: "fn-toggle", disabled: "disabled",
-      title: "Alternar entre valor constante e função de y", text: "ƒ(y)",
-    });
-    const label = el("label", { class: "comp" }, [cb, el("span", { text: campo }), num, fnBtn]);
+    const modo = el(
+      "select",
+      { class: "comp-mode", disabled: "disabled", title: "Forma da condição: número, função de y ou perfil parabólico" },
+      COMP_MODOS.map(([v, t]) => el("option", { value: v, text: t })),
+    );
+    const label = el("label", { class: "comp" }, [cb, el("span", { text: campo }), num, modo]);
+    setCompMode(label, num, "const");
     cb.addEventListener("change", () => {
       num.disabled = !cb.checked;
-      fnBtn.disabled = !cb.checked;
+      modo.disabled = !cb.checked;
     });
-    fnBtn.addEventListener("click", () => setCompMode(label, num, label.dataset.mode !== "func"));
+    modo.addEventListener("change", () => setCompMode(label, num, modo.value));
     return label;
   }
 
-  function setCompMode(label, num, isFunc) {
-    label.dataset.mode = isFunc ? "func" : "const";
-    if (isFunc) {
+  function setCompMode(label, num, modo) {
+    label.dataset.mode = modo;
+    const sel = label.querySelector(".comp-mode");
+    if (sel && sel.value !== modo) sel.value = modo;
+    if (modo === "func") {
       num.type = "text";
       num.placeholder = "ex.: 4*y*(1-y)";
       if (num.value === "0") num.value = "";
+    } else if (modo === "parab") {
+      num.type = "number";
+      num.placeholder = "vmax";
+      if (num.value.trim() === "" || num.value === "0") num.value = "1.5";
     } else {
       num.type = "number";
       num.placeholder = "";
@@ -290,23 +317,25 @@ const NovaSimulacao = (() => {
         if (valor == null) continue;
         const label = [...row.querySelectorAll(".comp")].find((l) => l.querySelector("span").textContent === campo);
         const cb = label.querySelector("input[type=checkbox]");
-        const fnBtn = label.querySelector(".fn-toggle");
+        const modo = label.querySelector(".comp-mode");
         const num = label.querySelector(".comp-value");
         if (typeof valor === "number") {
-          setCompMode(label, num, false);
+          setCompMode(label, num, "const");
           num.value = valor;
         } else if (valor && typeof valor === "object" && typeof valor.funcao === "string") {
-          setCompMode(label, num, true);
+          setCompMode(label, num, "func");
           num.value = valor.funcao;
+        } else if (valor && typeof valor === "object" && valor.perfil === "parabolico") {
+          setCompMode(label, num, "parab");
+          num.value = valor.vmax ?? 1.5;
         } else {
-          // outra forma de dict (ex. {perfil: parabolico, vmax: ...}) nao
-          // tem editor aqui ainda -- pula em vez de jogar "[object Object]"
-          // no campo de valor.
+          // outra forma de dict sem editor aqui -- pula em vez de jogar
+          // "[object Object]" no campo de valor.
           continue;
         }
         cb.checked = true;
         num.disabled = false;
-        fnBtn.disabled = false;
+        modo.disabled = false;
       }
     }
   }
@@ -324,6 +353,9 @@ const NovaSimulacao = (() => {
         if (label.dataset.mode === "func") {
           const expr = num.value.trim();
           if (expr) valores[campo] = { funcao: expr };
+        } else if (label.dataset.mode === "parab") {
+          const vmax = parseFloat(num.value);
+          if (!Number.isNaN(vmax)) valores[campo] = { perfil: "parabolico", vmax };
         } else {
           valores[campo] = parseFloat(num.value);
         }
@@ -384,6 +416,9 @@ const NovaSimulacao = (() => {
     document.getElementById("f-advection").value = sim.advection === "explicit" ? "eulerian" : sim.advection || "eulerian";
     document.getElementById("f-element").value = sim.element || "mini";
     document.getElementById("f-sl-boundary").value = sim.sl_boundary || "intercept";
+    const solver = sim.solver || {};
+    document.getElementById("f-solver-tol").value = solver.tol ?? 1e-8;
+    document.getElementById("f-solver-max-iter").value = solver.max_iter ?? 2000;
     updateAdvectionUI();
 
     const boundary = c.boundary || {};
@@ -522,6 +557,10 @@ const NovaSimulacao = (() => {
         element: document.getElementById("f-element").value,
         sl_boundary: document.getElementById("f-sl-boundary").value,
         vtk_interval: parseInt(document.getElementById("f-vtk-interval").value, 10),
+        solver: {
+          tol: parseFloat(document.getElementById("f-solver-tol").value),
+          max_iter: parseInt(document.getElementById("f-solver-max-iter").value, 10),
+        },
       },
       boundary: {
         priority: boundaryOrder,
@@ -663,6 +702,10 @@ const Resultados = (() => {
   // aplicado por cima do ajuste automatico de bbox, nao no lugar dele.
   let viewState = { zoom: 1, panX: 0, panY: 0 };
   let savedOverlays = []; // plotagens carregadas de arquivo: {name, campo, color, dash, samples, length}
+  // geometria do ultimo renderLinePlot por canvas (pra o tooltip de hover
+  // fazer hit-test sem re-derivar escala/acessores) -- {series, toX, toY,
+  // horizOf, vertOf, coordKey} ou null quando o grafico esta vazio.
+  const lastLinePlot = {};
   const OVERLAY_PALETTE = ["#f5a623", "#4caf7d", "#c77dff", "#f472b6", "#2dd4bf", "#a3e635", "#ff6b6b"];
   // estilo (cor + tracado) da linha "ao vivo" (a que segue o quadro atual,
   // em oposicao as plotagens salvas carregadas de arquivo em savedOverlays).
@@ -1067,6 +1110,7 @@ const Resultados = (() => {
   function renderLinePlot(canvasId, series, opts = {}) {
     const lc = document.getElementById(canvasId);
     const lctx = lc.getContext("2d");
+    lastLinePlot[canvasId] = null;  // repopulado no fim se o grafico for desenhado de fato
 
     // fundo sempre branco, pintado dentro do proprio canvas (nao so' via
     // CSS do wrapper) -- assim "salvar imagem" do canvas sai com fundo em
@@ -1229,6 +1273,10 @@ const Resultados = (() => {
       lx += 18 + lctx.measureText(label).width + 16;
       if (lx > lc.width - padRight - 40) { lx = padLeft; break; } // sem quebra de linha -- so evita estourar o canvas
     }
+
+    // guarda o suficiente pro tooltip de hover fazer hit-test dos pontos
+    // (ver bindPlotHover) sem re-derivar escala nem acessores.
+    lastLinePlot[canvasId] = { series, coordKey, coordOf, horizOf, vertOf, toX, toY };
   }
 
   function updateLinePlot(frame) {
@@ -1270,6 +1318,7 @@ const Resultados = (() => {
     }
     errorWrap.hidden = !errorSeries;
     if (errorSeries) renderLinePlot("r-error-canvas", [errorSeries], { forceAuto: true });
+    else lastLinePlot["r-error-canvas"] = null;
 
     if (!series.length) {
       hint.hidden = false;
@@ -1277,6 +1326,7 @@ const Resultados = (() => {
       const lc = document.getElementById("r-line-canvas");
       lc.getContext("2d").fillStyle = "#ffffff";
       lc.getContext("2d").fillRect(0, 0, lc.width, lc.height);
+      lastLinePlot["r-line-canvas"] = null;
       return;
     }
     hint.hidden = true;
@@ -1393,6 +1443,88 @@ const Resultados = (() => {
     document.getElementById("r-line-clear").disabled = true;
     document.getElementById("r-line-save").disabled = true;
     for (const id of ["r-line-x1", "r-line-y1", "r-line-x2", "r-line-y2"]) document.getElementById(id).value = "";
+  }
+
+  // -- tooltip de hover no grafico sobre a linha -----------------------
+
+  const HOVER_SNAP_PX = 14; // raio de captura de um ponto, em pixels do canvas
+
+  function plotTooltipEl() {
+    let tip = document.getElementById("line-plot-tooltip");
+    if (!tip) {
+      tip = el("div", { id: "line-plot-tooltip" });
+      tip.hidden = true;
+      document.body.appendChild(tip);
+    }
+    return tip;
+  }
+
+  function fmtHover(v) {
+    if (v === 0) return "0";
+    const a = Math.abs(v);
+    return a < 1e-3 || a >= 1e5 ? v.toExponential(3) : String(Number(v.toPrecision(6)));
+  }
+
+  function escHtml(s) {
+    return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  }
+
+  function hidePlotTooltip() {
+    plotTooltipEl().hidden = true;
+  }
+
+  // Acha o ponto amostrado mais proximo do cursor (qualquer serie) dentro de
+  // HOVER_SNAP_PX e mostra x/y/dist do ponto + o valor da variavel. So os
+  // graficos ja desenhados aparecem em lastLinePlot (null => vazio, ignora).
+  function showPlotTooltip(canvasId, ev) {
+    const plot = lastLinePlot[canvasId];
+    const tip = plotTooltipEl();
+    if (!plot) { tip.hidden = true; return; }
+
+    const cv = document.getElementById(canvasId);
+    const rect = cv.getBoundingClientRect();
+    const mx = (ev.clientX - rect.left) * (cv.width / rect.width);
+    const my = (ev.clientY - rect.top) * (cv.height / rect.height);
+
+    let best = null;
+    let bestD2 = HOVER_SNAP_PX * HOVER_SNAP_PX;
+    for (const s of plot.series) {
+      for (const p of s.samples) {
+        if (p.value === null || p.value === undefined) continue;
+        const dx = plot.toX(plot.horizOf(p)) - mx;
+        const dy = plot.toY(plot.vertOf(p)) - my;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < bestD2) { bestD2 = d2; best = { s, p }; }
+      }
+    }
+    if (!best) { tip.hidden = true; return; }
+
+    const { s, p } = best;
+    const campo = escHtml(s.campo);
+    const linhas = [`<b>${escHtml(s.name)}</b> (${campo})`];
+    if (p.x !== undefined && p.y !== undefined) {
+      linhas.push(`x = ${fmtHover(p.x)} y = ${fmtHover(p.y)}`);
+    }
+    if (p.dist !== undefined && plot.coordKey === "dist") linhas.push(`dist = ${fmtHover(p.dist)}`);
+    linhas.push(`${campo} = ${fmtHover(p.value)}`);
+    tip.innerHTML = linhas.join("<br>");
+    tip.hidden = false;
+
+    // ao lado do cursor, virando pra esquerda/cima se estourar a janela
+    const pad = 14;
+    const box = tip.getBoundingClientRect();
+    let left = ev.clientX + pad;
+    let top = ev.clientY + pad;
+    if (left + box.width > window.innerWidth - 4) left = ev.clientX - pad - box.width;
+    if (top + box.height > window.innerHeight - 4) top = ev.clientY - pad - box.height;
+    tip.style.left = `${Math.max(4, left)}px`;
+    tip.style.top = `${Math.max(4, top)}px`;
+  }
+
+  function bindPlotHover(canvasId) {
+    const cv = document.getElementById(canvasId);
+    cv.addEventListener("mousemove", (ev) => showPlotTooltip(canvasId, ev));
+    cv.addEventListener("mouseleave", hidePlotTooltip);
   }
 
   function bindLineControls() {
@@ -1599,6 +1731,9 @@ const Resultados = (() => {
         rerender();
       }
     }).observe(errorWrap);
+
+    bindPlotHover("r-line-canvas");
+    bindPlotHover("r-error-canvas");
   }
 
   function render(frame) {

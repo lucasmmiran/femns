@@ -110,8 +110,20 @@
             </select>
           </label>
 
+          <h3>Solver linear (BiCGSTAB)</h3>
+          <fieldset class="grid2">
+            <label class="field">
+              <span>tol (resíduo relativo)</span>
+              <input id="f-solver-tol" type="number" step="any" min="0" value="1e-8">
+            </label>
+            <label class="field">
+              <span>max_iter</span>
+              <input id="f-solver-max-iter" type="number" step="1" min="1" value="2000">
+            </label>
+          </fieldset>
+
           <h3>Condições de contorno</h3>
-          <p class="hint">Ordem da lista = prioridade (mais baixa no topo). Marque os componentes restringidos por contorno.</p>
+          <p class="hint">Ordem da lista = prioridade (mais baixa no topo). Marque os componentes restringidos por contorno; o seletor ao lado escolhe entre número, função de y (ex. <code>4*y*(1-y)</code>) e perfil parabólico (o campo passa a ser o <code>vmax</code>).</p>
           <ul id="boundary-list" class="boundary-list"></ul>
 
           <details class="advanced">

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Sobe a interface web opcional do femns (ver README.md, secao "Interface web").
-# Uso: ./femns-gui [--port PORTA] [--no-browser]
+# Uso: ./femns-gui [--port PORTA] [--no-browser] [--host ENDERECO] [--allow-no-auth]
+# Acesso remoto: FEMNS_GUI_TOKEN=<segredo> ./femns-gui --host 0.0.0.0  (ver plano_remoto.md)
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

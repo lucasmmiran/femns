@@ -19,6 +19,8 @@ import uuid
 
 import yaml
 
+from femns.simconfig import solver_options
+
 CAMPOS_PERMITIDOS_ADVECTION = ("eulerian", "semi_lagrangian")
 CAMPOS_PERMITIDOS_ELEMENT = ("mini", "tri6")
 CAMPOS_PERMITIDOS_SL_BOUNDARY = ("dirichlet", "intercept")
@@ -70,6 +72,10 @@ def validate_config(cfg: dict, meshes_root: str) -> None:
     vtk_interval = sim.get("vtk_interval", 10)
     if not isinstance(vtk_interval, int) or isinstance(vtk_interval, bool) or vtk_interval <= 0:
         raise ConfigError("simulation.vtk_interval precisa ser um inteiro positivo")
+    try:
+        solver_options(sim)  # valida o bloco opcional simulation.solver (tol/max_iter do BiCGSTAB)
+    except ValueError as e:
+        raise ConfigError(str(e)) from e
     if not isinstance(reynolds, (int, float)) or reynolds <= 0:
         raise ConfigError("simulation.reynolds precisa ser um numero positivo")
     if sim.get("advection", "eulerian") not in CAMPOS_PERMITIDOS_ADVECTION:

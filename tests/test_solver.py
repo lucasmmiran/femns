@@ -90,6 +90,45 @@ def test_time_step_ale_recai_no_euleriano_com_malha_parada():
     assert torch.equal(sem_w[1], com_w_zero[1])
 
 
+def test_time_step_euleriano_bate_com_a_forma_diag_explicita():
+    """O termo convectivo Euleriano e' `vg @ w` com `vg = diag(cx) Gvx + diag(cy) Gvy`.
+    A implementacao (cx (.) (Gvx@w) + cy (.) (Gvy@w)) tem que dar exatamente o
+    mesmo RHS -- e portanto a mesma solucao -- que formar `vg` denso e
+    multiplicar (o caminho anterior, O(n^2) de memoria).
+    """
+    torch.manual_seed(3)
+    npoints, ne = 5, 3
+    n = npoints + ne
+    N = 2 * n + npoints
+
+    Gvx = torch.rand(n, n, dtype=torch.float64).to_sparse_csr()
+    Gvy = torch.rand(n, n, dtype=torch.float64).to_sparse_csr()
+    M = (torch.eye(n, dtype=torch.float64) + 0.1 * torch.rand(n, n, dtype=torch.float64)).to_sparse_csr()
+    A = (torch.eye(N, dtype=torch.float64) + 0.05 * torch.rand(N, N, dtype=torch.float64)).to_sparse_csr()
+
+    vx = torch.rand(n, dtype=torch.float64) + 0.5
+    vy = torch.rand(n, dtype=torch.float64) + 0.5
+    wx = 0.3 * torch.rand(n, dtype=torch.float64)
+    wy = 0.3 * torch.rand(n, dtype=torch.float64)
+    zero_v = torch.zeros(n, dtype=torch.float64)
+    zero_p = torch.zeros(npoints, dtype=torch.float64)
+    e = torch.zeros(0, dtype=torch.long)
+    dt = 0.02
+
+    vx_novo, vy_novo, p_novo, *_ = time_step(
+        A, M, Gvx, Gvy, vx, vy, dt, zero_v, zero_v, zero_p, e, e, e, npoints, ne, wx=wx, wy=wy)
+
+    # forma densa explicita do mesmo RHS
+    cx, cy = vx - wx, vy - wy
+    vg = torch.diag(cx) @ Gvx.to_dense() + torch.diag(cy) @ Gvy.to_dense()
+    b_sup = (1 / dt) * (M.to_dense() @ vx) - vg @ vx
+    b_mid = (1 / dt) * (M.to_dense() @ vy) - vg @ vy
+    b = torch.cat([b_sup, b_mid, torch.zeros(npoints, dtype=torch.float64)])
+    x_ref = torch.linalg.solve(A.to_dense(), b)
+
+    assert torch.allclose(torch.cat([vx_novo, vy_novo, p_novo]), x_ref, atol=1e-8)
+
+
 def test_time_step_ale_usa_velocidade_relativa():
     """Passar w tem que ser equivalente a rodar sem w com o campo convectivo
     ja deslocado: e' a definicao de usar (v - w) como velocidade convectiva.

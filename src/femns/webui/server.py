@@ -7,10 +7,12 @@ importado por nenhum modulo do solver -- `scripts/run_simulation.py` continua
 funcionando sem isso instalado/rodando (ver README, secao "Interface web").
 """
 
+import hmac
 import json
 import mimetypes
 import os
 import re
+import sys
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -31,6 +33,57 @@ SAVED_CONFIGS_DIR = os.path.join(REPO_ROOT, "configs", "gui_saved")
 
 _ROUTES = []  # (method, re.Pattern, handler_name)
 
+# Enderecos que so aceitam conexao da propria maquina -- bind em qualquer
+# um deles dispensa autenticacao (ver `check_bind`).
+LOCAL_HOSTS = {"", "127.0.0.1", "localhost", "::1"}
+
+
+def is_local_host(host: str) -> bool:
+    return host in LOCAL_HOSTS
+
+
+def check_token(expected: str | None, auth_header: str | None, query: dict) -> bool:
+    """True se a requisicao pode acessar `/api/*`.
+
+    `expected` vazio/`None` => servidor sem autenticacao, tudo liberado.
+    Caso contrario exige `Authorization: Bearer <token>` **ou** `?token=<token>`
+    igual a `expected` (comparacao de tempo constante).
+    """
+    if not expected:
+        return True
+    supplied = ""
+    if auth_header and auth_header.startswith("Bearer "):
+        supplied = auth_header[len("Bearer "):].strip()
+    elif query.get("token"):
+        supplied = query["token"][0]
+    return bool(supplied) and hmac.compare_digest(supplied, expected)
+
+
+def check_bind(host: str, token: str | None, allow_no_auth: bool) -> str | None:
+    """Valida a combinacao host/token antes de subir o servidor.
+
+    - bind local (127.0.0.1/localhost): nada a fazer, retorna `None`.
+    - bind exposto **com** token: retorna um aviso (str) lembrando de HTTPS.
+    - bind exposto **sem** token, com `allow_no_auth`: retorna um aviso forte.
+    - bind exposto **sem** token, sem `allow_no_auth`: levanta `RuntimeError`
+      com as opcoes (tunel SSH, definir `FEMNS_GUI_TOKEN`, ou `--allow-no-auth`).
+
+    Ver `docs/planos/plano_remoto.md` para o passo a passo de acesso remoto.
+    """
+    if is_local_host(host):
+        return None
+    if token:
+        return (f"femns webui vai aceitar conexoes da rede (bind em {host}) -- protegido por FEMNS_GUI_TOKEN. "
+                f"Use HTTPS (proxy reverso) se o trafego passar por rede nao confiavel.")
+    if allow_no_auth:
+        return (f"ATENCAO: femns webui exposto em {host} SEM AUTENTICACAO (--allow-no-auth). "
+                f"Qualquer um que alcance esta porta pode lancar/cancelar simulacao e ler resultados.")
+    raise RuntimeError(
+        f"bind em {host!r} expoe a GUI na rede e nao ha autenticacao configurada. Opcoes:\n"
+        f"  - manter o bind local (127.0.0.1) e usar um tunel SSH  -- ver docs/planos/plano_remoto.md\n"
+        f"  - definir um token:  FEMNS_GUI_TOKEN=<segredo> ./femns-gui --host {host}\n"
+        f"  - por sua conta e risco (rede isolada/confiavel):  --allow-no-auth")
+
 
 def route(method: str, pattern: str):
     compiled = re.compile(pattern)
@@ -44,6 +97,7 @@ def route(method: str, pattern: str):
 
 class Handler(BaseHTTPRequestHandler):
     job_manager: JobManager = None  # setado por `make_server`
+    auth_token: str | None = None  # setado por `make_server` a partir de FEMNS_GUI_TOKEN
     _results_index: dict = {}  # id -> dir, preenchido por /api/results
     _results_lock = threading.Lock()
 
@@ -64,13 +118,23 @@ class Handler(BaseHTTPRequestHandler):
     def _dispatch(self, method):
         parsed = urlparse(self.path)
         path = parsed.path
+        query = parse_qs(parsed.query)
+
+        # So as rotas /api/* sao protegidas: o shell estatico (HTML/CSS/JS)
+        # precisa carregar sem token para conseguir mandar o token depois.
+        if path.startswith("/api/") and not check_token(
+            self.auth_token, self.headers.get("Authorization"), query
+        ):
+            self._json(401, {"error": "token ausente ou invalido (o servidor exige FEMNS_GUI_TOKEN)"})
+            return
+
         for m, pattern, handler_name in _ROUTES:
             if m != method:
                 continue
             match = pattern.fullmatch(path)
             if match:
                 try:
-                    getattr(self, handler_name)(match, parse_qs(parsed.query))
+                    getattr(self, handler_name)(match, query)
                 except ConfigError as e:
                     self._json(400, {"error": str(e)})
                 except json.JSONDecodeError as e:
@@ -217,17 +281,27 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, results.read_frame(self._run_dir(match.group("run_id")), int(match.group("n"))))
 
 
-def make_server(port: int = 8765) -> ThreadingHTTPServer:
+def make_server(port: int = 8765, host: str = "127.0.0.1", allow_no_auth: bool = False) -> ThreadingHTTPServer:
+    token = os.environ.get("FEMNS_GUI_TOKEN") or None
+    aviso = check_bind(host, token, allow_no_auth)  # levanta RuntimeError se o bind for inseguro
+    if aviso:
+        print(aviso, file=sys.stderr)
     Handler.job_manager = JobManager(REPO_ROOT)
-    return ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    Handler.auth_token = token
+    return ThreadingHTTPServer((host, port), Handler)
 
 
-def run(port: int = 8765, open_browser: bool = True):
-    httpd = make_server(port)
-    url = f"http://127.0.0.1:{port}/"
-    print(f"femns webui em {url} (Ctrl+C para parar)")
+def run(port: int = 8765, open_browser: bool = True, host: str = "127.0.0.1", allow_no_auth: bool = False):
+    httpd = make_server(port, host, allow_no_auth)
+    display_host = "127.0.0.1" if is_local_host(host) else host
+    url = f"http://{display_host}:{port}/"
+    token = Handler.auth_token
+    url_abrir = f"{url}?token={token}" if token else url
+    print(f"femns webui em {url}"
+          + (" (token exigido -- use a URL com ?token=... que o navegador abriu)" if token else "")
+          + " (Ctrl+C para parar)")
     if open_browser:
-        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+        threading.Timer(0.5, lambda: webbrowser.open(url_abrir)).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

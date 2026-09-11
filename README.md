@@ -30,7 +30,8 @@ velocidade — vértices + nó de aresta —, P1 para pressão).
 ├── scripts/
 │   ├── run_simulation.py    # CLI: orquestra mesh → assembly → boundary → solver → io
 │   ├── run_gui.py           # CLI: sobe a interface web opcional (ver seção "Interface web")
-│   └── plot_solution.py     # CLI: gera as imagens da última solução de uma simulação
+│   ├── plot_solution.py     # CLI: gera as imagens da última solução de uma simulação
+│   └── plot_linha.py        # CLI: amostra um campo sobre uma linha e grava .json (formato plots/)
 ├── tests/                    # testes unitários (conectividade, valores analíticos dos elementos MINI/Tri6, contornos)
 ├── solucoes/                  # saída dos .vtk (gerada em runtime, ignorada pelo git)
 ├── femns-gui                  # executável: wrapper de shell pra scripts/run_gui.py (ver "Interface web")
@@ -112,6 +113,11 @@ simulation:
   sl_boundary: intercept  # intercept (padrao) ou dirichlet -- so vale com semi_lagrangian
   element: mini  # mini (padrao) ou tri6
   vtk_interval: 10  # grava 1 .vtk a cada N iteracoes (padrao 10); a ultima e' sempre gravada
+  solver:                 # BiCGSTAB -- bloco opcional
+    tol: 1.0e-8           # residuo relativo alvo por passo (padrao 1e-8)
+    max_iter: 2000        # teto de iteracoes por passo (padrao 2000)
+    beta_por_passo: false # recalcular a equilibracao de pressao a cada passo
+                          #   de malha movel (padrao false)
 
 boundary:
   priority: [outlet, inlet, top, bottom]   # do menor para o maior prioridade
@@ -269,6 +275,25 @@ benchmark_xlsx: solucoes/benchmarks.xlsx
   campo final. `vtk_interval: 1` grava todo passo (comportamento
   anterior). Não afeta a numérica — só a densidade de frames no disco e
   o custo de I/O em runs longos.
+- **`simulation.solver`** (opcional): `tol` (resíduo relativo alvo do
+  BiCGSTAB por passo de tempo, padrão `1e-8`) e `max_iter` (teto de
+  iterações por passo, padrão `2000`) — os valores que antes estavam
+  fixos em `solver.time_step`. Uma malha maior ou um caso mais rígido
+  pode precisar de outro `max_iter` (o degrau Tri6 a Re=800 com malha
+  móvel precisa de ~6000 no transiente para atingir `1e-8`); afrouxar
+  `tol` troca precisão da solução por velocidade. Ausente, cai nos
+  padrões e nada muda.
+  `beta_por_passo` (padrão `false`) só tem efeito com `mesh_motion`:
+  recalcula `pressure_scale_factor` a cada passo (a equilibração
+  `‖A_vv‖/‖(Gx;Gy)‖` afinada na geometria inicial degrada quando a malha
+  deforma muito) e reescala o componente de pressão do warm-start.
+- **`mesh_motion` e a remontagem**: com a malha móvel o sistema `A` é
+  remontado a cada passo. A topologia não muda — só os valores —, então
+  `femns.reassembly.Remontador` captura o padrão de esparsidade e a
+  permutação do `coalesce` uma vez e nos passos seguintes só recomputa
+  valores (pula o `torch.cat` dos 9 blocos, o `coalesce` grande e o
+  `to_sparse_csr`). Verifica contra a montagem de referência no início
+  (imprime `erro de verificacao`, ~`1e-17`).
 
 Para testar rápido, copie o config e reduza `iterations` (ex.: 5) antes
 de apontar `--config` para a cópia — cada iteração numa malha grande
@@ -301,6 +326,28 @@ CPU, sem simulação de verdade.
 ./femns-gui --port 9000 --no-browser
 ```
 
+Por padrão o servidor faz bind em `127.0.0.1` (só aceita conexão da
+própria máquina) e **não tem autenticação**. Para acesso remoto o
+caminho recomendado é um túnel SSH, que não exige mudar nada
+(`ssh -N -L 8765:127.0.0.1:8765 usuario@servidor`, depois abrir
+`http://127.0.0.1:8765/` no cliente). Ver `docs/planos/plano_remoto.md` para o passo
+a passo, systemd e Tailscale.
+
+Se ainda assim precisar de bind na rede, `--host 0.0.0.0` **exige** um
+token no ambiente:
+
+```bash
+FEMNS_GUI_TOKEN=$(openssl rand -hex 16) ./femns-gui --host 0.0.0.0 --no-browser
+```
+
+Com `FEMNS_GUI_TOKEN` setado, toda rota `/api/*` passa a exigir o token
+(via `Authorization: Bearer` ou `?token=…`); a URL que o servidor imprime
+e abre no navegador já traz `?token=…`, e o frontend repassa o token em
+todas as chamadas. Sem token, `--host` não-local é recusado com uma
+mensagem explicando as opções — `--allow-no-auth` derruba essa trava
+(inseguro; só para rede isolada). HTTPS continua por sua conta (proxy
+reverso); o token vai em claro sem ele.
+
 `femns-gui` (executável na raiz do projeto) é um wrapper de shell fino em
 volta de `scripts/run_gui.py`: acha o Python certo (`.venv/` ao lado dele
 por padrão, `FEMNS_VENV=/caminho/para/outro/.venv ./femns-gui` pra apontar
@@ -323,11 +370,15 @@ Duas telas:
 
 - **Nova simulação**: escolhe a malha (lê os nomes de contorno reais do
   `.msh`, físical groups do Gmsh, via `femns.webui.meshes`), preenche
-  `dt`/`iterations`/`reynolds`/`advection`/`element`/`sl_boundary` e o
+  `dt`/`iterations`/`reynolds`/`advection`/`element`/`sl_boundary`, o
   intervalo de gravação de `.vtk` (campo "Gravar .vtk a cada" na área de
-  template, logo abaixo do rótulo — `simulation.vtk_interval`, padrão 10),
+  template, logo abaixo do rótulo — `simulation.vtk_interval`, padrão 10)
+  e `tol`/`max_iter` do BiCGSTAB (seção "Solver linear",
+  `simulation.solver`),
   monta `boundary.priority`/`boundary.conditions` num editor (reordenar
-  prioridade, marcar `vx`/`vy`/`p` por contorno) — com um seletor de
+  prioridade, marcar `vx`/`vy`/`p` por contorno, e por componente escolher
+  entre número, função de `y` ou perfil parabólico no seletor ao lado) —
+  com um seletor de
   template que pré-preenche tudo a partir de um `configs/*.yaml`
   existente. "Salvar configuração" grava o formulário inteiro (nome
   escolhido na hora) em `configs/gui_saved/` via `femns.webui.saved_configs`
@@ -343,21 +394,31 @@ Duas telas:
   e log em tempo real, com botão de cancelar.
   Saída em `solucoes/gui/<rótulo>-<timestamp>/` (git-ignorado, mesmo
   tratamento do resto de `solucoes/`). O editor de condição de contorno
-  só cobre valores numéricos uniformes — condição com perfil (ex.
-  `{perfil: parabolico, vmax: ...}`, ver `boundary.valores_da_condicao`)
-  ainda não tem campo próprio; carregar um template que use perfil deixa
-  aquele componente sem marcar em vez de mostrar o valor errado.
+  cobre as três formas que `boundary.valores_da_condicao` aceita: número
+  uniforme, função de `y` (ex. `4*y*(1-y)`) e perfil parabólico (o campo
+  de valor passa a ser o `vmax`) — o seletor `núm / ƒ(y) / parábola` ao
+  lado de cada componente escolhe qual. Só uma forma de dict fica de fora
+  (nenhuma outra existe hoje): um valor que o editor não reconheça é
+  deixado sem marcar em vez de mostrar valor errado.
 - **Resultados**: lista qualquer diretório sob `solucoes/` que tenha
   `solucao -N.vtk` (runs da GUI ou do CLI direto), carrega os quadros
   sob demanda (`femns.webui.results`, um `.vtk` por requisição, não tudo
   de uma vez) e desenha o campo escolhido (`vx`, `vy`, `p` ou `|v|`)
   num canvas 2D (colormap `jet`, sombreamento plano por triângulo).
   Play/pause, passo a passo, slider de quadro, toggle de malha.
+  Traçando uma linha sobre o campo sai um gráfico de perfil ao longo
+  dela, com curvas de referência carregadas de `.json` (ver `plots/`) e
+  um gráfico de erro relativo ao lado; passar o mouse sobre um ponto de
+  qualquer curva mostra `x`/`y`/`dist` e o valor.
 
 Todo endpoint que recebe path do cliente (malha, run de resultado)
 valida contra uma lista construída no servidor — o cliente nunca manda
 um path de arquivo direto, só nomes/ids opacos (ver `jobs.validate_config`
-e o índice `run_id → dir` em `server.py`).
+e o índice `run_id → dir` em `server.py`). Isso barra leitura de arquivo
+arbitrário, mas **não** controla *quem* chama as rotas — daí o bind local
+por padrão e o token de `FEMNS_GUI_TOKEN` para bind na rede (`server.check_token`
+protege `/api/*`; o shell estático continua aberto para o frontend poder
+carregar e então mandar o token).
 
 ## Lint
 
@@ -398,6 +459,19 @@ Na malha do Poiseuille de exemplo (~19 mil incógnitas), isso roda a
 (`torch.linalg.solve(A.to_dense(), b)`) — a solução numérica é idêntica
 nos dois casos, só a forma de resolver o sistema linear mudou.
 
+O termo convectivo Euleriano (`solver.time_step`, caminho
+`advection: eulerian`) é aplicado direto como
+`cx ⊙ (Gvx @ w) + cy ⊙ (Gvy @ w)`, sem formar `diag(cx)` densa `n×n` —
+era `O(n²)` de VRAM por passo e limitava a malha a ~20 mil elementos;
+agora escala como o resto do solver. Resultado algebricamente idêntico.
+
+**Casos que não convergem em `max_iter=2000`:** o degrau Tri6 a Re=800
+(estático precisa de ~6000 iterações; com `mesh_motion` o transiente
+inicial fica em resíduo ~`1e-3`, e só depois que o escoamento assenta o
+warm-start traz o resíduo para perto de `1e-8`). São o regime que
+motiva um pré-condicionador de bloco (ver `docs/planos/plano_07set.md`
+§6) — a equilibração escalar sozinha não basta a Re alto.
+
 ## Benchmark entre simulações
 
 Se o config tiver a chave `benchmark_xlsx` (ver seção "Config" acima),
@@ -428,8 +502,9 @@ pedido.
   Tri6; sem elementos quadrilaterais).
 - `moving_point` (órbita de um nó) não foi testado com `element: tri6` —
   só com MINI. `advection: semi_lagrangian` está validado com os dois
-  elementos; `mesh_motion` tem o caminho de código para os dois (nós
-  extras recalculados dos vértices) mas só foi exercitado com MINI.
+  elementos; `mesh_motion` roda com os dois (nós extras recalculados dos
+  vértices; a remontagem incremental de `femns.reassembly` é verificada
+  contra a montagem do zero para MINI e Tri6).
 - Elementos com orientação horária não são tratados de forma robusta
   (as malhas do projeto têm zero; `assembly` toma `abs` da área mas não
   dos coeficientes `bi`/`ci`). Com `mesh_motion` ligado isso deixa de
@@ -438,6 +513,8 @@ pedido.
   nó) — um experimento de robustez da malha móvel/ALE, não um caso de
   uso. Falta um esquema movido por deslocamento físico real (o projeto
   de mestrado descreve uma válvula fechando).
-- `tol`/`max_iter` do BiCGSTAB estão com valores padrão fixos em
-  `time_step` (`1e-8`/`2000`), não expostos no config yaml — ajustar
-  diretamente no código se uma malha maior precisar de outros valores.
+- Pré-condicionador de bloco / complemento de Schur ainda não
+  implementado: hoje o BiCGSTAB roda com equilibração escalar de pressão
+  e sem pré-condicionador (Jacobi piorou a convergência). Uma malha bem
+  maior deve fazer o número de iterações crescer com `1/h` — ver
+  `docs/planos/plano_07set.md` §6 para o levantamento de pré-condicionadores.

@@ -532,9 +532,10 @@ pelo próprio método.
 
 Limitações conhecidas desta implementação:
 \begin{itemize}
-  \item $\text{tol}=10^{-8}$ e $\text{max\_iter}=2000$ estão fixos como
-    padrão em \texttt{time\_step}, não expostos no config \texttt{yaml}
-    do projeto;
+  \item $\text{tol}=10^{-8}$ e $\text{max\_iter}=2000$ são apenas os
+    \emph{padrões} de \texttt{time\_step}; podem ser sobrescritos pelo
+    bloco opcional \texttt{simulation.solver} do config \texttt{yaml}
+    (\texttt{femns.simconfig.solver\_options});
   \item não há pré-condicionador de bloco/complemento de Schur, que
     tende a ser necessário para malhas bem maiores (o reescalonamento
     escalar aqui resolve o desbalanço de \emph{ordem de grandeza} entre

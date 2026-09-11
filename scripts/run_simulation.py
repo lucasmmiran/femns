@@ -33,8 +33,10 @@ from femns.moving_mesh import (
     preparar_oscilacao,
     velocidade_malha,
 )
+from femns.reassembly import Remontador
 from femns.report import salvar_resumo
 from femns.semi_lagrangian import calculo_sl
+from femns.simconfig import solver_options
 from femns.solver import build_system_matrix, pressure_scale_factor, time_step
 
 
@@ -73,6 +75,7 @@ def main():
         raise ValueError(
             f"simulation.vtk_interval precisa ser um inteiro positivo (recebido: {vtk_interval!r}) -- "
             f"grava um .vtk a cada N iteracoes; a ultima iteracao e' sempre gravada")
+    bicgstab_tol, bicgstab_max_iter, beta_por_passo = solver_options(cfg["simulation"])
     output_dir = cfg["output_dir"]
 
     start = timer()
@@ -93,6 +96,9 @@ def main():
         print('Gravacao de .vtk: a cada iteracao')
     else:
         print(f'Gravacao de .vtk: a cada {vtk_interval} iteracoes (+ a ultima)')
+    print(f'BiCGSTAB: tol={bicgstab_tol:g}, max_iter={bicgstab_max_iter}')
+    if beta_por_passo:
+        print('Equilibracao de pressao: recalculada a cada passo (beta_por_passo)')
     print('\n--------------------------------------------')
 
     mesh = read_mesh(cfg["mesh"]) # Criado um objeto Mesh para a malha utilizada
@@ -153,13 +159,10 @@ def main():
     def montar_sistema(X, Y, beta=None):
         """Assembly + matriz de bloco + condicoes de contorno, para a geometria dada.
 
-        Fatorado numa funcao porque com `mesh_motion` a malha muda a cada
-        passo e o sistema precisa ser remontado junto (ver o laco abaixo).
-        `beta` e' calculado na primeira chamada e **reaproveitado** nas
-        seguintes: ele e' so a escala numerica que condiciona o sistema de
-        sela (ver `solver.build_system_matrix`), e mante-lo fixo evita que
-        o significado de `p_tilde = p/beta` -- que viaja entre passos em
-        `x0` -- mude no meio da simulacao.
+        Montagem completa (do zero). Usada uma vez no inicio; com
+        `mesh_motion` os passos seguintes usam `femns.reassembly.Remontador`,
+        que so recomputa valores no padrao de esparsidade fixo. `beta` vindo
+        preenchido pula o `pressure_scale_factor`.
         """
         if element == "tri6":
             K, M, Gx, Gy, Gvx, Gvy = assemble_tri6(X, Y, IEN, npoints, nnodes)
@@ -179,6 +182,21 @@ def main():
 
     print(f"Tempo depois do assembly: {round(timer() - start, 2)}")
     t_assembly = timer() - start
+
+    # Com mesh_motion o sistema e' remontado a cada passo. `Remontador` captura
+    # o padrao de esparsidade + a permutacao do coalesce uma vez e nos passos
+    # seguintes so recomputa valores (pula o torch.cat de blocos, o coalesce
+    # grande e o to_sparse_csr). Verifica contra a montagem de referencia.
+    mm_cfg = cfg.get("mesh_motion", {})
+    mm_enabled = mm_cfg.get("enabled", False)
+    remontador = None
+    if mm_enabled:
+        remontador = Remontador(
+            dt, Re, X, Y, IEN, element, npoints, n_extra,
+            vx_cc_pts, vy_cc_pts, p_cc_pts, beta,
+            precisa_gv=(advection == "eulerian"))
+        print(f"Remontador de malha movel: erro de verificacao {remontador.erro_verificacao:.1e} "
+              f"(vs montagem de referencia)")
 
     # Registro opcional de metricas (femns.report) pra comparar simulacoes
     # entre si -- so ativa se o config tiver benchmark_xlsx, pra nao mudar
@@ -232,9 +250,7 @@ def main():
     # So nos de VERTICE que nao estao em nenhum contorno (`ccName[n] is None`):
     # os nos extras do elemento sao definidos pelos vertices e sao
     # reposicionados por `atualiza_nos_extras` depois de cada deslocamento,
-    # nao oscilam por conta propria.
-    mm_cfg = cfg.get("mesh_motion", {})
-    mm_enabled = mm_cfg.get("enabled", False)
+    # nao oscilam por conta propria.  (`mm_cfg`/`mm_enabled` ja lidos acima.)
     oscilacao = None
     if mm_enabled:
         mm_omega = mm_cfg.get("omega", np.pi * 200)
@@ -296,7 +312,13 @@ def main():
                     f"Reduza mesh_motion.amplitude_factor (atual: {mm_cfg.get('amplitude_factor', 0.3)})."
                 )
 
-            A, M, Gvx, Gvy, Gx, Gy, beta = montar_sistema(X, Y, beta=beta)
+            beta_anterior = beta
+            A, M, Gvx, Gvy, Gx, Gy, beta = remontador.remontar(
+                X, Y, beta=(None if beta_por_passo else beta))
+            if beta_por_passo and beta != beta_anterior:
+                # x0 carrega p_tilde = p / beta_anterior; o novo sistema resolve
+                # p / beta, entao reescala so o componente de pressao do warm-start.
+                x0[2 * nnodes:] *= beta_anterior / beta
             if benchmark_xlsx:
                 Dx = (-torch.transpose(Gx, 0, 1)).coalesce().to_sparse_csr()
                 Dy = (-torch.transpose(Gy, 0, 1)).coalesce().to_sparse_csr()
@@ -326,7 +348,7 @@ def main():
             A, M, Gvx, Gvy, vx, vy, dt,
             vx_cc, vy_cc, p_cc, vx_cc_pts, vy_cc_pts, p_cc_pts,
             npoints, n_extra, beta=beta, x0=x0, vx_star=vx_star, vy_star=vy_star,
-            wx=wx, wy=wy,
+            wx=wx, wy=wy, tol=bicgstab_tol, max_iter=bicgstab_max_iter,
         )
         pbar.set_postfix(bicg_iters=info["iters"], residual=f'{info["residual"]:.1e}')
 
@@ -387,7 +409,7 @@ def main():
             bicg_iters_max=max(bicg_iters_hist),
             bicg_residual_media=sum(bicg_residual_hist) / len(bicg_residual_hist),
             bicg_residual_max=max(bicg_residual_hist),
-            passos_nao_convergidos=sum(1 for r in bicg_residual_hist if r > 1e-8),  # mesmo tol padrao de solver.time_step
+            passos_nao_convergidos=sum(1 for r in bicg_residual_hist if r > bicgstab_tol),  # tol efetivo (simulation.solver.tol)
             vel_l2_media=sum(vel_l2_hist) / len(vel_l2_hist),
             vel_l2_max=max(vel_l2_hist),
             vel_linf_max=max(vel_linf_hist),
