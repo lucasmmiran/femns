@@ -1,0 +1,48 @@
+# Ambiente exato da femns v1.0 (pip freeze do .venv em 2026-10-10).
+#
+# Python 3.12.3 | torch 2.12.1+rocm7.2 (HIP 7.2.53211, GPU AMD -- ver README)
+# Reproduzir:
+#   python3.12 -m venv .venv
+#   .venv/bin/pip install -r requirements-v1.lock --extra-index-url https://download.pytorch.org/whl/rocm7.2
+#   .venv/bin/pip install -e . --no-deps
+# Sem GPU AMD: troque a linha do torch por `torch==2.12.1` e use o indice
+# https://download.pytorch.org/whl/cpu (o solver cai para CPU sozinho).
+contourpy==1.3.3
+cycler==0.12.1
+et_xmlfile==2.0.0
+filelock==3.29.0
+fonttools==4.63.0
+fsspec==2026.4.0
+greenlet==3.5.5
+iniconfig==2.3.0
+Jinja2==3.1.6
+kiwisolver==1.5.0
+markdown-it-py==4.2.0
+MarkupSafe==3.0.3
+matplotlib==3.11.1
+mdurl==0.1.2
+meshio==5.3.5
+mpmath==1.3.0
+networkx==3.6.1
+numpy==2.5.1
+openpyxl==3.1.5
+packaging==26.2
+pillow==12.3.0
+playwright==1.62.0
+pluggy==1.6.0
+pyee==13.0.1
+Pygments==2.20.0
+pyparsing==3.3.2
+pytest==9.1.1
+python-dateutil==2.9.0.post0
+PyYAML==6.0.3
+rich==15.0.0
+ruff==0.15.20
+scipy==1.18.0
+setuptools==70.2.0
+six==1.17.0
+sympy==1.14.0
+torch==2.12.1+rocm7.2
+tqdm==4.68.3
+triton-rocm==3.7.1
+typing_extensions==4.15.0
