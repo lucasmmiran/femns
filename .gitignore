@@ -11,7 +11,5 @@ configs/gui_saved/
 solucoes/gui/
 .~lock.*#
 CLAUDE.local.md
-docs/*.aux
-docs/*.log
-docs/*.out
-docs/*.toc
+# documentacao (tese, planos, relatorios) fica so local, fora do repositorio
+docs/
