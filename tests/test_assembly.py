@@ -1,15 +1,14 @@
 import torch
 
-from femns.assembly import assemble_mini, assemble_tri6
+from femns.elemento import MINI, TRI6
+from geometrias import triangulo_mini_referencia, triangulo_tri6_referencia
 
 
 def test_assemble_mini_triangulo_referencia():
     """Triangulo retangulo (0,0),(1,0),(0,1), area=0.5, checado contra valores analiticos."""
-    X = torch.tensor([0.0, 1.0, 0.0, 1.0 / 3.0], dtype=torch.float64)
-    Y = torch.tensor([0.0, 0.0, 1.0, 1.0 / 3.0], dtype=torch.float64)
-    IEN = torch.tensor([[0, 1, 2, 3]], dtype=torch.long)
+    X, Y, IEN = triangulo_mini_referencia()
 
-    K, M, Gx, Gy, Gvx, Gvy = assemble_mini(X, Y, IEN, ne=1, npoints=3)
+    K, M, Gx, Gy = MINI.montar(X, Y, IEN, npoints=3, nnodes=4)
 
     K_dense = K.to_dense()
     M_dense = M.to_dense()
@@ -42,56 +41,6 @@ def test_assemble_mini_triangulo_referencia():
 
     assert Gx.shape == (4, 3)
     assert Gy.shape == (4, 3)
-    # valores de Gvx/Gvy: ver test_assemble_mini_gvx_gvy_valores
-
-
-def test_assemble_mini_gvx_gvy_valores():
-    """Gvx/Gvy do MINI conferidos entrada a entrada (nao so shape).
-
-    Sao as matrizes do termo convectivo, montadas e usadas em TODA iteracao
-    do caminho eulerian (`solver.time_step`, `vg = vx_diag@Gvx + vy_diag@Gvy`)
-    -- um erro de sinal ou de termo aqui nao quebra nenhum outro teste.
-
-    Convencao (confirmada simbolicamente com sympy, base NODAL do MINI --
-    `Ni = li - 9*li*lj*lk`, `Nb = 27*li*lj*lk`, ver CLAUDE.local.md 2026-07-12):
-        Gvx[i][j] = INT( Ni * dNj/dx )   (derivada na funcao de forma)
-    Triangulo de referencia (0,0),(1,0),(0,1), area 1/2.
-    """
-    X = torch.tensor([0.0, 1.0, 0.0, 1.0 / 3.0], dtype=torch.float64)
-    Y = torch.tensor([0.0, 0.0, 1.0, 1.0 / 3.0], dtype=torch.float64)
-    IEN = torch.tensor([[0, 1, 2, 3]], dtype=torch.long)
-
-    _, _, _, _, Gvx, Gvy = assemble_mini(X, Y, IEN, ne=1, npoints=3)
-    Gvx, Gvy = Gvx.to_dense(), Gvy.to_dense()
-
-    Gvx_esperado = (1.0 / 120.0) * torch.tensor([
-        [-20,   2,  -9,  27],
-        [ -2,  20,   9, -27],
-        [-11,  11,   0,   0],
-        [-27,  27,   0,   0],
-    ], dtype=torch.float64)
-    Gvy_esperado = (1.0 / 120.0) * torch.tensor([
-        [-20,  -9,   2,  27],
-        [-11,   0,  11,   0],
-        [ -2,   9,  20, -27],
-        [-27,   0,  27,   0],
-    ], dtype=torch.float64)
-    assert torch.allclose(Gvx, Gvx_esperado, atol=1e-12)
-    assert torch.allclose(Gvy, Gvy_esperado, atol=1e-12)
-
-    # -- invariantes estruturais (valem em qualquer malha, nao so nesta) --
-    z4 = torch.zeros(4, dtype=torch.float64)
-    # particao da unidade: campo de velocidade uniforme => conveccao nula.
-    assert torch.allclose(Gvx.sum(dim=1), z4, atol=1e-12)
-    assert torch.allclose(Gvy.sum(dim=1), z4, atol=1e-12)
-    # Gvx @ x_nodal = INT(Ni): fixa a ESCALA e o SINAL global (soma de linha
-    # nula sozinha nao pega Gvx -> -Gvx). Vertices 11/120, bolha 27/120.
-    int_Ni = torch.tensor([11, 11, 11, 27], dtype=torch.float64) / 120.0
-    assert torch.allclose(Gvx @ X, int_Ni, atol=1e-12)
-    assert torch.allclose(Gvy @ Y, int_Ni, atol=1e-12)
-    # Gvx so envolve as derivadas em x (bi); Gvx @ y_nodal tem que zerar.
-    assert torch.allclose(Gvx @ Y, z4, atol=1e-12)
-    assert torch.allclose(Gvy @ X, z4, atol=1e-12)
 
 
 def test_assemble_tri6_triangulo_referencia():
@@ -100,11 +49,9 @@ def test_assemble_tri6_triangulo_referencia():
     esperados obtidos por integracao simbolica exata (sympy) das funcoes de
     forma P2 (velocidade) e P1 (pressao) e conferidos contra a saida da funcao.
     """
-    X = torch.tensor([0.0, 1.0, 0.0, 0.5, 0.5, 0.0], dtype=torch.float64)
-    Y = torch.tensor([0.0, 0.0, 1.0, 0.0, 0.5, 0.5], dtype=torch.float64)
-    IEN = torch.tensor([[0, 1, 2, 3, 4, 5]], dtype=torch.long)
+    X, Y, IEN = triangulo_tri6_referencia()
 
-    K, M, Gx, Gy, Gvx, Gvy = assemble_tri6(X, Y, IEN, npoints=3, nnodes=6)
+    K, M, Gx, Gy = TRI6.montar(X, Y, IEN, npoints=3, nnodes=6)
 
     K_esperado = (1.0 / 6.0) * torch.tensor([
         [6, 1, 1, -4, 0, -4],
@@ -132,7 +79,7 @@ def test_assemble_tri6_triangulo_referencia():
     assert torch.allclose(K.to_dense().sum(dim=1), torch.zeros(6, dtype=torch.float64), atol=1e-10)
 
     # Gx/Gy: gradiente P2 COMPLETO, INT(phi_j dN_i/dx) -- `gxele`/`gyele` da
-    # referencia, nao a variante "slip" (ver docstring de assemble_tri6).
+    # referencia, nao a variante "slip" (ver docstring de elemento.Tri6).
     Gx_esperado = (1.0 / 6.0) * torch.tensor([
         [-1, 0, 0],
         [0, 1, 0],
@@ -156,55 +103,6 @@ def test_assemble_tri6_triangulo_referencia():
     # Uma pressao constante nao pode gerar forca liquida: soma de cada coluna = 0.
     assert torch.allclose(Gx.to_dense().sum(dim=0), torch.zeros(3, dtype=torch.float64), atol=1e-10)
     assert torch.allclose(Gy.to_dense().sum(dim=0), torch.zeros(3, dtype=torch.float64), atol=1e-10)
-    # valores de Gvx/Gvy: ver test_assemble_tri6_gvx_gvy_valores
-
-
-def test_assemble_tri6_gvx_gvy_valores():
-    """Gvx/Gvy do Tri6 conferidos entrada a entrada (nao so shape).
-
-    Mesma motivacao de `test_assemble_mini_gvx_gvy_valores` (termo convectivo
-    usado em toda iteracao eulerian) e mesma forma fraca -- `Gvx[i][j] =
-    INT(Ni dNj/dx)` com base P2 (`Ni = li(2li-1)`, `N_ij = 4 li lj`),
-    conferida simbolicamente e contra `gvxele` de `referencia/ref tri6/
-    assembly-tri6.py`. Triangulo de referencia com nos de aresta nos pontos
-    medios (v4=aresta(v1,v2), v5=aresta(v2,v3), v6=aresta(v3,v1)).
-    """
-    X = torch.tensor([0.0, 1.0, 0.0, 0.5, 0.5, 0.0], dtype=torch.float64)
-    Y = torch.tensor([0.0, 0.0, 1.0, 0.0, 0.5, 0.5], dtype=torch.float64)
-    IEN = torch.tensor([[0, 1, 2, 3, 4, 5]], dtype=torch.long)
-
-    _, _, _, _, Gvx, Gvy = assemble_tri6(X, Y, IEN, npoints=3, nnodes=6)
-    Gvx, Gvy = Gvx.to_dense(), Gvy.to_dense()
-
-    Gvx_esperado = (1.0 / 30.0) * torch.tensor([
-        [-2, -1,  0,  3, -1,  1],
-        [ 1,  2,  0, -3, -1,  1],
-        [ 1, -1,  0,  0,  2, -2],
-        [-3,  3,  0,  0,  4, -4],
-        [ 1,  3,  0, -4,  8, -8],
-        [-3, -1,  0,  4,  8, -8],
-    ], dtype=torch.float64)
-    Gvy_esperado = (1.0 / 30.0) * torch.tensor([
-        [-2,  0, -1,  1, -1,  3],
-        [ 1,  0, -1, -2,  2,  0],
-        [ 1,  0,  2,  1, -1, -3],
-        [-3,  0, -1, -8,  8,  4],
-        [ 1,  0,  3, -8,  8, -4],
-        [-3,  0,  3, -4,  4,  0],
-    ], dtype=torch.float64)
-    assert torch.allclose(Gvx, Gvx_esperado, atol=1e-12)
-    assert torch.allclose(Gvy, Gvy_esperado, atol=1e-12)
-
-    # -- invariantes estruturais --
-    z6 = torch.zeros(6, dtype=torch.float64)
-    assert torch.allclose(Gvx.sum(dim=1), z6, atol=1e-12)   # particao da unidade
-    assert torch.allclose(Gvy.sum(dim=1), z6, atol=1e-12)
-    # INT(Ni): 0 nos vertices P2, 1/6 nos nos de aresta -- fixa escala e sinal.
-    int_Ni = torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.float64) / 6.0
-    assert torch.allclose(Gvx @ X, int_Ni, atol=1e-12)
-    assert torch.allclose(Gvy @ Y, int_Ni, atol=1e-12)
-    assert torch.allclose(Gvx @ Y, z6, atol=1e-12)
-    assert torch.allclose(Gvy @ X, z6, atol=1e-12)
 
 
 def _scatter_add(local: torch.Tensor, linhas: list[int], colunas: list[int], shape: tuple[int, int]) -> torch.Tensor:
@@ -231,8 +129,8 @@ def test_assemble_mini_dois_elementos_acumula_no_no_compartilhado():
     IEN = torch.tensor([[0, 1, 2, 4], [1, 3, 2, 5]], dtype=torch.long)
     npoints, ne = 4, 2
 
-    matrizes = assemble_mini(X, Y, IEN, ne=ne, npoints=npoints)
-    nomes = ["K", "M", "Gx", "Gy", "Gvx", "Gvy"]
+    matrizes = MINI.montar(X, Y, IEN, npoints=npoints, nnodes=npoints + ne)
+    nomes = ["K", "M", "Gx", "Gy"]
     n = npoints + ne
 
     for nome, glob in zip(nomes, matrizes):
@@ -243,8 +141,8 @@ def test_assemble_mini_dois_elementos_acumula_no_no_compartilhado():
             vel = [i, j, k, npoints + e]
             xl = X[[i, j, k, npoints + e]]
             yl = Y[[i, j, k, npoints + e]]
-            locais = dict(zip(nomes, (m.to_dense() for m in assemble_mini(
-                xl, yl, torch.tensor([[0, 1, 2, 3]]), ne=1, npoints=3))))
+            locais = dict(zip(nomes, (m.to_dense() for m in MINI.montar(
+                xl, yl, torch.tensor([[0, 1, 2, 3]]), npoints=3, nnodes=4))))
             colunas = vel[:3] if nome in ("Gx", "Gy") else vel
             ref += _scatter_add(locais[nome], vel, colunas, (n, largura))
         assert torch.allclose(glob.to_dense(), ref, atol=1e-12), f"{nome} diverge do laco elemento a elemento"
@@ -270,8 +168,8 @@ def test_assemble_tri6_dois_elementos_acumula_no_no_compartilhado():
     IEN = torch.tensor([[0, 1, 2, 4, 5, 6], [1, 3, 2, 7, 8, 5]], dtype=torch.long)
     npoints, nnodes = 4, 9
 
-    matrizes = assemble_tri6(X, Y, IEN, npoints=npoints, nnodes=nnodes)
-    nomes = ["K", "M", "Gx", "Gy", "Gvx", "Gvy"]
+    matrizes = TRI6.montar(X, Y, IEN, npoints=npoints, nnodes=nnodes)
+    nomes = ["K", "M", "Gx", "Gy"]
 
     for nome, glob in zip(nomes, matrizes):
         largura = npoints if nome in ("Gx", "Gy") else nnodes
@@ -279,7 +177,7 @@ def test_assemble_tri6_dois_elementos_acumula_no_no_compartilhado():
         for e in range(2):
             vel = IEN[e].tolist()
             press = IEN[e][:3].tolist()
-            locais = dict(zip(nomes, (m.to_dense() for m in assemble_tri6(
+            locais = dict(zip(nomes, (m.to_dense() for m in TRI6.montar(
                 X[IEN[e]], Y[IEN[e]], torch.tensor([[0, 1, 2, 3, 4, 5]]), npoints=3, nnodes=6))))
             colunas = press if nome in ("Gx", "Gy") else vel
             ref += _scatter_add(locais[nome], vel, colunas, (nnodes, largura))

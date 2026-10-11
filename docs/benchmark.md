@@ -3,7 +3,7 @@
 Se o config tiver a chave `benchmark_xlsx`, `scripts/run_simulation.py`
 acrescenta, ao final da simulação, **1 linha** nesse arquivo `.xlsx`
 (`femns.report.salvar_resumo`) — sem sobrescrever runs anteriores. A ideia é
-comparar `dt`/malha/`Re`/`advection` lado a lado numa tabela só, não analisar
+comparar `dt`/malha/`Re`/`element` lado a lado numa tabela só, não analisar
 um único run em detalhe (não há série temporal por iteração, só valores
 agregados — ver seção final sobre essa limitação).
 
@@ -17,7 +17,7 @@ Não são métricas — servem só pra saber o que gerou aquela linha.
 |---|---|
 | `timestamp` | Data/hora (local) em que a simulação terminou e a linha foi salva. |
 | `mesh` | Caminho do `.msh` usado (`cfg["mesh"]`). |
-| `advection` | `eulerian` ou `semi_lagrangian` (`cfg["simulation"]["advection"]`) — qual formulação do termo convectivo foi usada nesse run. |
+| `advection` | Na v2.0 sempre `semi_lagrangian`; na v1.0 distinguia `eulerian` × `semi_lagrangian` (`cfg["simulation"]["advection"]`). Mantida por compatibilidade com planilhas antigas. |
 | `dt` | Passo de tempo. |
 | `reynolds` | Número de Reynolds da simulação. |
 | `iterations` | Quantas iterações de tempo foram rodadas. |
@@ -30,7 +30,7 @@ Não são métricas — servem só pra saber o que gerou aquela linha.
 | Coluna | O que é |
 |---|---|
 | `tempo_total_s` | Tempo de ponta a ponta (leitura de malha + assembly + todas as iterações). |
-| `tempo_assembly_s` | Tempo até a matriz global `A` estar pronta (leitura de malha, montagem de `K,M,Gx,Gy,Gvx,Gvy`, `build_system_matrix`) — fora do loop de tempo, pago uma vez só. |
+| `tempo_assembly_s` | Tempo até a matriz global `A` estar pronta (leitura de malha, montagem de `K,M,Gx,Gy`, `build_system_matrix`) — fora do loop de tempo, pago uma vez só. |
 | `tempo_medio_por_iter_s` | `(tempo_total_s - tempo_assembly_s) / iterations` — custo médio de 1 passo de tempo (advecção + solve do BiCGSTAB + escrita do `.vtk`). |
 
 ## Convergência do BiCGSTAB

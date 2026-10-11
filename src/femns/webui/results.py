@@ -6,15 +6,12 @@ diretorio raiz, `scan_runs` acha os runs e `read_frame`/`read_meta` leem os
 `femns.plotting`).
 """
 
-import glob
 import hashlib
 import os
-import re
 
 import meshio
-import numpy as np
 
-FRAME_RE = re.compile(r"solucao -(\d+)\.vtk$")
+from femns.io import conectividade, listar_frames, numero_frame
 
 CAMPOS = ("vx", "vy", "p")
 
@@ -25,7 +22,7 @@ def _run_id(path: str) -> str:
 
 
 def scan_runs(root: str) -> dict[str, dict]:
-    """Varre `root` recursivamente por diretorios com `solucao -N.vtk` (ver `femns.plotting.ultimo_vtk`).
+    """Varre `root` recursivamente por diretorios com frames `solucao-N.vtk` (ver `femns.io.listar_frames`).
 
     Retorna {id: {"dir": path, "label": nome relativo, "nframes": int}}.
     """
@@ -33,7 +30,7 @@ def scan_runs(root: str) -> dict[str, dict]:
     if not os.path.isdir(root):
         return runs
     for dirpath, _dirnames, filenames in os.walk(root):
-        frames = [f for f in filenames if FRAME_RE.search(f)]
+        frames = [f for f in filenames if numero_frame(f) is not None]
         if not frames:
             continue
         rid = _run_id(dirpath)
@@ -46,24 +43,14 @@ def scan_runs(root: str) -> dict[str, dict]:
 
 
 def _frame_path(run_dir: str, n: int) -> str:
-    candidatos = glob.glob(os.path.join(run_dir, "solucao -*.vtk"))
-    por_numero = {int(FRAME_RE.search(c).group(1)): c for c in candidatos}
-    if n not in por_numero:
-        raise FileNotFoundError(f"frame {n} nao encontrado em {run_dir!r} (disponiveis: {sorted(por_numero)[:5]}...)")
-    return por_numero[n]
+    frames = listar_frames(run_dir)
+    if n not in frames:
+        raise FileNotFoundError(f"frame {n} nao encontrado em {run_dir!r} (disponiveis: {sorted(frames)[:5]}...)")
+    return frames[n]
 
 
 def frame_numbers(run_dir: str) -> list[int]:
-    candidatos = glob.glob(os.path.join(run_dir, "solucao -*.vtk"))
-    return sorted(int(FRAME_RE.search(c).group(1)) for c in candidatos)
-
-
-def _triangle_cells(cells) -> np.ndarray:
-    for bloco in cells:
-        tipo, dados = (bloco.type, bloco.data) if hasattr(bloco, "type") else bloco
-        if tipo == "triangle":
-            return np.asarray(dados)
-    raise ValueError("nenhum bloco 'triangle' encontrado no .vtk")
+    return list(listar_frames(run_dir))
 
 
 def read_meta(run_dir: str) -> dict:
@@ -95,7 +82,7 @@ def read_frame(run_dir: str, n: int) -> dict:
     campos escalares (`vx`, `vy`, `p`, quando presentes) como listas de float.
     """
     malha = meshio.read(_frame_path(run_dir, n))
-    triangulos = _triangle_cells(malha.cells)
+    triangulos = conectividade(malha.cells, "triangle")
     pontos = malha.points[:, :2]
 
     out = {

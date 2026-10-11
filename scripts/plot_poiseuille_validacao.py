@@ -33,7 +33,7 @@ import numpy as np
 import yaml
 from matplotlib import pyplot as plt
 
-from femns.plotting import ultimo_vtk
+from femns.io import ultimo_frame
 
 
 def parse_args():
@@ -107,11 +107,11 @@ def main():
         cfg = yaml.safe_load(f)
     vmax = vmax_do_config(cfg)
 
-    casos = [(args.label or "numerico", ultimo_vtk(cfg["output_dir"]))]
+    casos = [(args.label or "numerico", ultimo_frame(cfg["output_dir"]))]
     if args.config_b:
         with open(args.config_b) as f:
             cfg_b = yaml.safe_load(f)
-        casos.append((args.label_b or "numerico (B)", ultimo_vtk(cfg_b["output_dir"])))
+        casos.append((args.label_b or "numerico (B)", ultimo_frame(cfg_b["output_dir"])))
 
     output_dir = args.output_dir or os.path.join(cfg["output_dir"], "validacao")
     os.makedirs(output_dir, exist_ok=True)

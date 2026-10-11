@@ -2,7 +2,7 @@
 """CLI: gera imagens lado a lado comparando a ultima solucao de duas simulacoes.
 
 Pensado pra comparar duas simulacoes da mesma malha (ex.: `simulation.element:
-mini` vs `tri6`, ou `simulation.advection: eulerian` vs `semi_lagrangian`) --
+mini` vs `tri6`, ou com e sem `mesh_motion`) --
 mesma escala de cor por variavel nos dois lados, pra comparacao visual direta.
 """
 
@@ -10,7 +10,8 @@ import argparse
 
 import yaml
 
-from femns.plotting import plot_comparacao_ultimas_solucoes, ultimo_vtk
+from femns.io import ultimo_frame
+from femns.plotting import ler_solucao, plot_solucoes
 
 
 def parse_args():
@@ -35,12 +36,12 @@ def main():
     with open(args.config_b) as f:
         cfg_b = yaml.safe_load(f)
 
-    vtk_a = ultimo_vtk(cfg_a["output_dir"])
-    vtk_b = ultimo_vtk(cfg_b["output_dir"])
+    vtk_a = ultimo_frame(cfg_a["output_dir"])
+    vtk_b = ultimo_frame(cfg_b["output_dir"])
     label_a = args.label_a or _rotulo_padrao(cfg_a, "A")
     label_b = args.label_b or _rotulo_padrao(cfg_b, "B")
 
-    caminhos = plot_comparacao_ultimas_solucoes(vtk_a, vtk_b, label_a, label_b, args.output_dir)
+    caminhos = plot_solucoes([ler_solucao(vtk_a), ler_solucao(vtk_b)], [label_a, label_b], args.output_dir)
 
     print(f"Solucao A ({label_a}): {vtk_a}")
     print(f"Solucao B ({label_b}): {vtk_b}")

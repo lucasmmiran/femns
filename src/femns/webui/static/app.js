@@ -400,7 +400,7 @@ const NovaSimulacao = (() => {
   // Preenche o formulario inteiro a partir de um config (template do
   // projeto ou configuracao salva, mesmo formato de `buildConfig()`) --
   // sempre "load" completo, nao merge: campos ausentes no config (ex.
-  // moving_point/mesh_motion quando o preset nao usa) voltam pro estado
+  // mesh_motion quando o preset nao usa) voltam pro estado
   // desligado em vez de manter o que estava preenchido antes.
   function applyConfig(c) {
     const sim = c.simulation || {};
@@ -410,25 +410,15 @@ const NovaSimulacao = (() => {
     // config antigo sem a chave: volta pro padrao 10 (mesmo default de
     // run_simulation.py/jobs.py), nao mantem o que estava no campo.
     document.getElementById("f-vtk-interval").value = sim.vtk_interval ?? 10;
-    // "explicit" e o nome antigo de "eulerian" (ver run_simulation.py) --
-    // normaliza aqui pra templates salvos antes da renomeacao continuarem
-    // carregando certo em vez de deixar o select sem nenhuma opcao valida.
-    document.getElementById("f-advection").value = sim.advection === "explicit" ? "eulerian" : sim.advection || "eulerian";
+    // `advection`/`sl_boundary`/`moving_point` de configs antigos (v1.0) sao
+    // ignorados: a v2.0 so tem adveccao semi-Lagrangeana por interceptacao.
     document.getElementById("f-element").value = sim.element || "mini";
-    document.getElementById("f-sl-boundary").value = sim.sl_boundary || "intercept";
     const solver = sim.solver || {};
     document.getElementById("f-solver-tol").value = solver.tol ?? 1e-8;
     document.getElementById("f-solver-max-iter").value = solver.max_iter ?? 2000;
-    updateAdvectionUI();
 
     const boundary = c.boundary || {};
     applyBoundaryConditions(boundary.conditions, boundary.priority);
-
-    const mp = c.moving_point || {};
-    document.getElementById("mp-enabled").checked = !!mp.enabled;
-    document.getElementById("mp-node").value = mp.node_index ?? 0;
-    document.getElementById("mp-amp").value = mp.amplitude_factor ?? 0.1;
-    document.getElementById("mp-omega").value = mp.omega ?? 628.3185307179587;
 
     const mm = c.mesh_motion || {};
     document.getElementById("mm-enabled").checked = !!mm.enabled;
@@ -446,11 +436,6 @@ const NovaSimulacao = (() => {
       document.getElementById("f-mesh").value = meshName;
       refreshMeshDependentUI();
     }
-  }
-
-  function updateAdvectionUI() {
-    const advection = document.getElementById("f-advection").value;
-    document.getElementById("f-sl-boundary-wrap").style.display = advection === "semi_lagrangian" ? "" : "none";
   }
 
   // -- template (unifica templates do projeto + configuracoes salvas) ---
@@ -553,9 +538,7 @@ const NovaSimulacao = (() => {
         dt: parseFloat(document.getElementById("f-dt").value),
         iterations: parseInt(document.getElementById("f-iterations").value, 10),
         reynolds: parseFloat(document.getElementById("f-reynolds").value),
-        advection: document.getElementById("f-advection").value,
         element: document.getElementById("f-element").value,
-        sl_boundary: document.getElementById("f-sl-boundary").value,
         vtk_interval: parseInt(document.getElementById("f-vtk-interval").value, 10),
         solver: {
           tol: parseFloat(document.getElementById("f-solver-tol").value),
@@ -568,14 +551,6 @@ const NovaSimulacao = (() => {
       },
     };
 
-    if (document.getElementById("mp-enabled").checked) {
-      cfg.moving_point = {
-        enabled: true,
-        node_index: parseInt(document.getElementById("mp-node").value, 10),
-        amplitude_factor: parseFloat(document.getElementById("mp-amp").value),
-        omega: parseFloat(document.getElementById("mp-omega").value),
-      };
-    }
     if (document.getElementById("mm-enabled").checked) {
       cfg.mesh_motion = {
         enabled: true,
@@ -662,12 +637,10 @@ const NovaSimulacao = (() => {
   }
 
   function init() {
-    document.getElementById("f-advection").addEventListener("change", updateAdvectionUI);
-    document.getElementById("f-element").addEventListener("change", updateAdvectionUI);
     document.getElementById("form-nova").addEventListener("submit", onSubmit);
     bindTemplateControls();
     bindMeshPreviewControls();
-    loadAll().then(updateAdvectionUI);
+    loadAll();
     refreshJobs();
     jobsTimer = setInterval(refreshJobs, 2000);
   }
@@ -877,6 +850,7 @@ const Resultados = (() => {
   // buffer de pixels reaproveitado entre quadros (evita realocar 4 bytes por
   // pixel a cada frame durante o playback)
   let smoothBuffer = null;
+  const pesos = new Float64Array(3); // saida de pesosBaricentricos, reaproveitada
   let smoothBufferW = 0, smoothBufferH = 0;
 
   // Rasteriza cada triangulo por pixel, interpolando o VALOR do campo por
@@ -886,6 +860,21 @@ const Resultados = (() => {
   // "Gouraud" da interpolacao P1 que a propria malha ja representa -- os
   // vertices compartilhados entre triangulos garantem continuidade nas
   // arestas internas, sem costura visivel.
+  // Coordenadas baricentricas (wa, wb, wc) do ponto (x, y) no triangulo
+  // a-b-c, escritas em `out` (reaproveitado pelo chamador: no laco de
+  // pixels nao aloca nada por pixel). Devolve false se o triangulo for
+  // degenerado (area zero). Usada pela pintura suave do campo e pela
+  // amostragem sobre a linha -- cada uma aplica sua propria tolerancia
+  // para decidir se o ponto esta dentro (wa, wb, wc >= -tol).
+  function pesosBaricentricos(x, y, ax, ay, bx, by, cx, cy, out) {
+    const denom = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+    if (denom === 0) return false;
+    out[0] = ((by - cy) * (x - cx) + (cx - bx) * (y - cy)) / denom;
+    out[1] = ((cy - ay) * (x - cx) + (ax - cx) * (y - cy)) / denom;
+    out[2] = 1 - out[0] - out[1];
+    return true;
+  }
+
   function renderFieldSmooth(frame, valores, vmin, range, toPx, preset, ndiv) {
     const W = canvas.width, H = canvas.height;
     if (!smoothBuffer || smoothBufferW !== W || smoothBufferH !== H) {
@@ -923,16 +912,11 @@ const Resultados = (() => {
       const maxY = Math.min(H - 1, Math.ceil(Math.max(ay, by, cy)));
       if (minX > maxX || minY > maxY) continue;
 
-      const denom = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
-      if (denom === 0) continue;
-
       for (let py = minY; py <= maxY; py++) {
         const pyc = py + 0.5;
         for (let px = minX; px <= maxX; px++) {
-          const pxc = px + 0.5;
-          const wa = ((by - cy) * (pxc - cx) + (cx - bx) * (pyc - cy)) / denom;
-          const wb = ((cy - ay) * (pxc - cx) + (ax - cx) * (pyc - cy)) / denom;
-          const wc = 1 - wa - wb;
+          if (!pesosBaricentricos(px + 0.5, pyc, ax, ay, bx, by, cx, cy, pesos)) continue; // degenerado
+          const wa = pesos[0], wb = pesos[1], wc = pesos[2];
           if (wa < -1e-6 || wb < -1e-6 || wc < -1e-6) continue;
           const val = wa * va + wb * vb + wc * vc;
           const [r, g, bch] = colormapColor(preset, quantize((val - vmin) / range, ndiv));
@@ -952,8 +936,8 @@ const Resultados = (() => {
 
   // Localiza o triangulo que contem (x,y) por busca linear (nao ha
   // estrutura de adjacencia no lado do cliente) e interpola o valor nodal
-  // por coordenadas baricentricas -- mesma logica de renderFieldSmooth, so
-  // que avaliada num ponto arbitrario em vez de rasterizada em toda a tela.
+  // por coordenadas baricentricas (`pesosBaricentricos`, a mesma conta de
+  // renderFieldSmooth), so que num ponto arbitrario em vez de na tela toda.
   // O tamanho tipico das malhas do projeto (milhares de triangulos) x poucas
   // centenas de amostras por linha fica bem dentro do orcamento de um clique.
   function interpolateFieldAt(x, y, frame, valores) {
@@ -962,11 +946,8 @@ const Resultados = (() => {
       const pa = frame.points[a], pb = frame.points[b], pc = frame.points[c];
       if (x < Math.min(pa[0], pb[0], pc[0]) || x > Math.max(pa[0], pb[0], pc[0])) continue;
       if (y < Math.min(pa[1], pb[1], pc[1]) || y > Math.max(pa[1], pb[1], pc[1])) continue;
-      const denom = (pb[1] - pc[1]) * (pa[0] - pc[0]) + (pc[0] - pb[0]) * (pa[1] - pc[1]);
-      if (denom === 0) continue;
-      const wa = ((pb[1] - pc[1]) * (x - pc[0]) + (pc[0] - pb[0]) * (y - pc[1])) / denom;
-      const wb = ((pc[1] - pa[1]) * (x - pc[0]) + (pa[0] - pc[0]) * (y - pc[1])) / denom;
-      const wc = 1 - wa - wb;
+      if (!pesosBaricentricos(x, y, pa[0], pa[1], pb[0], pb[1], pc[0], pc[1], pesos)) continue;
+      const wa = pesos[0], wb = pesos[1], wc = pesos[2];
       if (wa < -1e-9 || wb < -1e-9 || wc < -1e-9) continue;
       return wa * valores[a] + wb * valores[b] + wc * valores[c];
     }
@@ -1744,7 +1725,7 @@ const Resultados = (() => {
     updateColorbar(vmin, vmax);
 
     // bbox do proprio quadro (nao de `currentRun.meta`, calculado so no
-    // primeiro frame) -- com malha movel (mesh_motion/moving_point) os
+    // primeiro frame) -- com malha movel (mesh_motion) os
     // pontos deslocam um pouco a cada passo, e um bbox fixo cortaria a
     // visualizacao nos ultimos quadros.
     const xs = frame.points.map((p) => p[0]);

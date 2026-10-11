@@ -1,3 +1,11 @@
+# Degrau (backward-facing step) na malha versionada `meshes/degrau.msh`.
+#
+# Caso de VALIDACAO (Gartling 1990 / Armaly et al. 1983, Re=800) usado na
+# tese -- NAO e' este arquivo: roda na malha `meshes/degrau_30.msh` (canal
+# x em [0,30], y em [-0.5,0.5], nao versionada) com entrada
+# `vx: {funcao: 24*y*(0.5-y)}` (perfil parabolico na metade de cima),
+# `reynolds: 800`, `dt: 0.06`, `element: tri6`. Ver
+# docs/tese/registro-desenvolvimento.md (entrada de 2026-09-07).
 mesh: meshes/degrau.msh
 output_dir: solucoes/degrau
 benchmark_xlsx: solucoes/benchmarks.xlsx
@@ -6,22 +14,23 @@ simulation:
   dt: 0.01
   iterations: 1000
   reynolds: 1
-  advection: eulerian  # eulerian (padrao) ou semi_lagrangian
+  element: mini  # mini (padrao) ou tri6
+  vtk_interval: 10
 
 boundary:
   # Ordem de prioridade dos contornos, da mais baixa para a mais alta.
-  # Quando um nó pertence a mais de um contorno (ex.: quinas da malha),
-  # vale a condição do último nome desta lista que o contém.
   priority: [outlet, inlet, top, bottom]
   conditions:
     inlet:  {vx: 1.0, vy: 0.0}
     bottom: {vx: 0.0, vy: 0.0}
     top:    {vx: 0.0, vy: 0.0}
-    outlet: {p: 0.0} #Velocidade solta para que o códigogere a solução.
+    outlet: {p: 0.0}  # velocidade livre na saida
 
-# Deslocamento senoidal de um nó da malha (experimento de malha móvel).
-moving_point:
+# Malha movel (ALE): todos os nos interiores oscilam. omega da 20 passos por
+# periodo com dt=0.01 (o antigo default pi*200 daria exatamente 1 passo por
+# periodo -- malha parada numa posicao deslocada, ver README).
+mesh_motion:
   enabled: false
-  node_index: 345
-  amplitude_factor: 0.1
-  omega: 628.3185307179587  # pi * 200
+  amplitude_factor: 0.3
+  omega: 31.4159265358979  # 20 passos por periodo com dt=0.01
+  seed: 0

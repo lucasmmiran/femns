@@ -1,5 +1,14 @@
 # Semi-Lagrangeano para o elemento Tri6: plano de implementação
 
+> **Nota (v2.0, 11/10/2026):** documento histórico. `interpolar_mini` e
+> `interpolar_tri6` viraram `funcoes_forma` das classes `Mini`/`Tri6` em
+> `src/femns/elemento.py` (o recorte dos λ ficou em
+> `ElementoTriangular.recorta_lambdas`, a interpolação em
+> `ElementoTriangular.interpolar`); `montar_node_to_elem`/`montar_edge_to_elem`
+> viraram `mesh.montar_no_para_elem`; a advecção Euleriana citada aqui foi
+> removida (existe na tag `v1.0`); `localizar_pontos_partida` virou o método
+> `Localizador.localizar` (`semi_lagrangian.py`). As fórmulas não mudaram.
+
 Status: **implementado e validado** (ver §9). As decisões dos itens 5.A–C
 foram tomadas pelo Lucas: A) restrição quadrática na aresta de saída;
 B) clamp de λ idêntico ao MINI, herdado por analogia (ver `docs/lambda.md`);
@@ -186,7 +195,7 @@ mascarar fórmula errada se os valores coincidirem nos dois casos):
   `semi_lagrangian`, `dt` pequeno — mesmo protocolo usado para validar
   o MINI e o BiCGSTAB. Antes de comparar os campos, contar quantos nós
   de fato saem do domínio nessa configuração (ver
-  `docs/relatorio_sl_boundary.md`, §1: um `dt` pequeno pode não
+  `docs/00.archives/relatorio_sl_boundary.md`, §1: um `dt` pequeno pode não
   exercitar o fallback de contorno e dar "idêntico" sem validar nada).
 
 ## 7. Ordem de implementação sugerida
@@ -203,10 +212,10 @@ mascarar fórmula errada se os valores coincidirem nos dois casos):
 
 ## 8. Referências
 
-Mesma base teórica de `docs/semi_lagrangian_strategy.pdf`: Pironneau
+Mesma base teórica de `docs/00.archives/semi_lagrangian_strategy.pdf`: Pironneau
 (1982), Donea & Huerta (2003), Devillers, Pion & Teillaud (2001),
 Staniforth & Côté (1991). A convenção de funções de forma P2 usada aqui
-é a mesma de `assembly.assemble_tri6` (Zienkiewicz vol. 1, cap. 8).
+é a mesma de `elemento.Tri6` (antes `assembly.assemble_tri6`) (Zienkiewicz vol. 1, cap. 8).
 
 ## 9. Validação (resultados)
 
@@ -215,7 +224,7 @@ Staniforth & Côté (1991). A convenção de funções de forma P2 usada aqui
 O ponto crítico da implementação — a restrição quadrática na aresta de
 saída (§5.A) só é exercitada de fato quando um nó **interior** sai do
 domínio, não quando só nós de contorno saem (mesma armadilha documentada
-em `docs/relatorio_sl_boundary.md`, §1, para o degrau). Por isso a
+em `docs/00.archives/relatorio_sl_boundary.md`, §1, para o degrau). Por isso a
 validação principal desta base é **unitária, com valores construídos à
 mão**, não o Poiseuille real (ver §9.2 sobre por que o Poiseuille não
 teria discriminado nada aqui):
@@ -238,10 +247,10 @@ teria discriminado nada aqui):
 Malha `meshes/poiseuille.msh` (2785 nós de vértice, 5376 elementos,
 10945 nós Tri6), Re=1, `dt=0.001`, 300 iterações, `sl_boundary:
 intercept`. Configs: `configs/poiseuille_tri6.yaml` (eulerian) e
-`configs/poiseuille_tri6_sl.yaml` (semi_lagrangian).
+`configs/poiseuille_tri6_sl.yaml` (semi_lagrangian) -- removidos na v2.0, existem na tag `v1.0`.
 
 **Contagem de saída antes de comparar** (lição repetida de
-`docs/relatorio_sl_boundary.md`): com o campo já desenvolvido (100
+`docs/00.archives/relatorio_sl_boundary.md`): com o campo já desenvolvido (100
 passos), `dt=0.001` produz **63 nós que saem do domínio, todos do
 `inlet`** — onde `vx=1` é Dirichlet uniforme em toda a aresta. Como no
 caso do degrau em `dt=0.01`, essa configuração **não exercita** a

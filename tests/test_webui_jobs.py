@@ -85,7 +85,9 @@ def test_expected_frame_count(iterations, intervalo, esperado):
     assert expected_frame_count(iterations, intervalo) == esperado
 
 
-@pytest.mark.parametrize("campo,valor", [("advection", "bogus"), ("element", "bogus"), ("sl_boundary", "bogus")])
+@pytest.mark.parametrize("campo,valor", [("advection", "bogus"), ("advection", "eulerian"),  # eulerian: removido na v2.0
+                                         ("element", "bogus"), ("sl_boundary", "bogus"),
+                                         ("sl_boundary", "dirichlet")])  # dirichlet: removido na v2.0
 def test_validate_config_rejeita_enum_invalido(meshes_root, campo, valor):
     cfg = config_valido()
     cfg["simulation"][campo] = valor
@@ -118,3 +120,13 @@ def test_validate_config_rejeita_boundary_ausente(meshes_root):
     cfg["boundary"] = {}
     with pytest.raises(ConfigError):
         validate_config(cfg, meshes_root)
+
+
+def test_validate_config_rejeita_moving_point(meshes_root):
+    cfg = config_valido()
+    cfg["moving_point"] = {"enabled": True, "node_index": 0}
+    with pytest.raises(ConfigError, match="moving_point"):
+        validate_config(cfg, meshes_root)
+    cfg["moving_point"]["enabled"] = False  # bloco desligado de config antigo: aceito (ignorado)
+    validate_config(cfg, meshes_root)
+

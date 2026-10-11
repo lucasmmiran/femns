@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI: roda uma simulacao de Navier-Stokes (elemento MINI ou Tri6, Euler implicito) a partir de um config yaml."""
+"""CLI: roda uma simulacao de Navier-Stokes (elemento MINI ou Tri6, Euler implicito, adveccao semi-Lagrangeana) a partir de um config yaml."""
 
 import argparse
 import os
@@ -11,33 +11,21 @@ import torch
 import yaml
 from tqdm import tqdm
 
-from femns.assembly import assemble_mini, assemble_tri6
-from femns.boundary import apply_boundary_conditions, assign_boundary_names, build_boundary_conditions
-from femns.io import write_vtk
+from femns.boundary import assign_boundary_names, build_boundary_conditions
+from femns.elemento import elemento_por_nome
+from femns.io import caminho_frame, write_vtk
 from femns.mesh import (
     area_com_sinal,
     atualiza_nos_extras,
-    elem_mini,
-    elem_tri6,
-    estende_IENbound_tri6,
-    montar_edge_to_elem,
-    montar_EToE,
-    montar_node_to_elem,
     montar_NToN,
     read_mesh,
 )
-from femns.moving_mesh import (
-    aplicar_oscilacao,
-    mover_ponto,
-    passos_por_periodo,
-    preparar_oscilacao,
-    velocidade_malha,
-)
+from femns.moving_mesh import aplicar_oscilacao, passos_por_periodo, preparar_oscilacao
 from femns.reassembly import Remontador
 from femns.report import salvar_resumo
-from femns.semi_lagrangian import calculo_sl
-from femns.simconfig import solver_options
-from femns.solver import build_system_matrix, pressure_scale_factor, time_step
+from femns.semi_lagrangian import Localizador, calculo_sl
+from femns.simconfig import validar_config
+from femns.solver import time_step
 
 
 def parse_args():
@@ -51,31 +39,11 @@ def main():
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
-    dt = cfg["simulation"]["dt"]
-    Iter = cfg["simulation"]["iterations"]
-    Re = cfg["simulation"]["reynolds"]
-    advection = cfg["simulation"].get("advection", "eulerian")
-    element = cfg["simulation"].get("element", "mini")
-    sl_boundary = cfg["simulation"].get("sl_boundary", "intercept")
-    vtk_interval = cfg["simulation"].get("vtk_interval", 10)
-    if advection == "explicit":
-        raise ValueError(
-            "simulation.advection: 'explicit' foi renomeado para 'eulerian' -- "
-            "e a descricao Euleriana do termo convectivo, em contraste com 'semi_lagrangian'. "
-            "Atualize o config (o metodo em si nao mudou)."
-        )
-    if advection not in ("eulerian", "semi_lagrangian"):
-        raise ValueError(
-            f"simulation.advection desconhecido: {advection!r} (use 'eulerian' ou 'semi_lagrangian')")
-    if element not in ("mini", "tri6"):
-        raise ValueError(f"simulation.element desconhecido: {element!r} (use 'mini' ou 'tri6')")
-    if sl_boundary not in ("dirichlet", "intercept"):
-        raise ValueError(f"simulation.sl_boundary desconhecido: {sl_boundary!r} (use 'dirichlet' ou 'intercept')")
-    if not isinstance(vtk_interval, int) or isinstance(vtk_interval, bool) or vtk_interval <= 0:
-        raise ValueError(
-            f"simulation.vtk_interval precisa ser um inteiro positivo (recebido: {vtk_interval!r}) -- "
-            f"grava um .vtk a cada N iteracoes; a ultima iteracao e' sempre gravada")
-    bicgstab_tol, bicgstab_max_iter, beta_por_passo = solver_options(cfg["simulation"])
+    params = validar_config(cfg)  # todas as regras do config (femns.simconfig, as mesmas da GUI)
+    dt, Iter, Re = params.dt, params.iterations, params.reynolds
+    element, vtk_interval = params.element, params.vtk_interval
+    bicgstab_tol, bicgstab_max_iter, beta_por_passo = params.tol, params.max_iter, params.beta_por_passo
+    elemento = elemento_por_nome(element)  # a unica escolha do elemento: o objeto vai adiante
     output_dir = cfg["output_dir"]
 
     start = timer()
@@ -88,9 +56,6 @@ def main():
     print(f'Numero de iteracoes: {Iter}')
     print(f'Passo de tempo: {dt}')
     print(f'Numero de Reynolds: {Re}')
-    print(f'Método escolhido: {advection}')
-    if advection == "semi_lagrangian":
-        print(f'Tratamento fora do dominio: {sl_boundary}')
     print(f'Elemento: {element}')
     if vtk_interval == 1:
         print('Gravacao de .vtk: a cada iteracao')
@@ -107,14 +72,8 @@ def main():
     # Augmenta a malha de vertices (mesh.IEN) com os nos extras do elemento
     # de velocidade escolhido, e estende IENbound de acordo (so o Tri6 tem
     # no extra em contorno -- a bolha do MINI e sempre interna ao elemento).
-    if element == "tri6":
-        IEN_np, X_np, Y_np, edge_para_no = elem_tri6(mesh.IEN, mesh.X, mesh.Y)
-        IENbound_bc = estende_IENbound_tri6(mesh.IENbound, edge_para_no)
-        nnodes = X_np.shape[0]
-    else:
-        IEN_np, X_np, Y_np = elem_mini(mesh.IEN, mesh.X, mesh.Y)
-        IENbound_bc = mesh.IENbound
-        nnodes = npoints + ne
+    IEN_np, X_np, Y_np, IENbound_bc = elemento.adiciona_nos(mesh.IEN, mesh.X, mesh.Y, mesh.IENbound)
+    nnodes = X_np.shape[0]
     n_extra = nnodes - npoints  # equivalente a `ne` para boundary/solver (ver docstrings)
 
     print('Leitura de malha completa:')
@@ -130,84 +89,46 @@ def main():
         IENbound_bc, ccName, cfg["boundary"]["conditions"], npoints, device, mesh.IENpoint, nnodes=nnodes,
         X=X_np, Y=Y_np, IENboundElem=mesh.IENboundElem)
 
-    # Dirichlet por no, ja resolvido (perfis inclusive) -- passado ao
-    # semi-Lagrangeano em vez de deixar ele reinterpretar o config, que nao
-    # enxerga a extensao geometrica dos contornos (ver calculo_sl).
+    # Dirichlet por no, ja resolvido (perfis inclusive) -- o semi-Lagrangeano
+    # usa no residuo de nos sem cruzamento de contorno util (ver calculo_sl).
     has_vx_bc = np.zeros(nnodes, dtype=bool)
     has_vy_bc = np.zeros(nnodes, dtype=bool)
     has_vx_bc[vx_cc_pts.cpu().numpy()] = True
     has_vy_bc[vy_cc_pts.cpu().numpy()] = True
     bc_dirichlet = (vx_cc.cpu().numpy(), has_vx_bc, vy_cc.cpu().numpy(), has_vy_bc)
 
-    # Conectividade de vizinhanca (malha so de vertices, antes de acrescentar os nos extras)
-    NToN = montar_NToN(mesh.IEN, npoints)
-
-    if advection == "semi_lagrangian":
-        EToE, _ = montar_EToE(mesh.IEN)
-        node_to_elem = montar_node_to_elem(mesh.IEN, npoints)
-        # No MINI o no extra `npoints+e` E' o centroide do elemento `e` --
-        # `calculo_sl` usa isso por padrao (`np.arange(ne)`). No Tri6 o no de
-        # aresta e' compartilhado entre ate 2 elementos, sem essa correspondencia
-        # direta por indice, entao precisa de uma semente construida (ver
-        # mesh.montar_edge_to_elem e o docstring de semi_lagrangian.calculo_sl).
-        elem_start_extra = montar_edge_to_elem(IEN_np, npoints, n_extra) if element == "tri6" else None
+    # Busca por elemento do semi-Lagrangeano: so a topologia (vizinhos e semente
+    # de cada no), que nao muda com a malha movel -- criada uma vez.
+    localizador = Localizador(IEN_np, nnodes)
 
     IEN, X, Y = torch.from_numpy(IEN_np).to(device), torch.from_numpy(X_np).to(device), torch.from_numpy(Y_np).to(device)
 
     print(f"Tempo ate o assembly: {round(timer() - start, 2)}")
 
-    def montar_sistema(X, Y, beta=None):
-        """Assembly + matriz de bloco + condicoes de contorno, para a geometria dada.
-
-        Montagem completa (do zero). Usada uma vez no inicio; com
-        `mesh_motion` os passos seguintes usam `femns.reassembly.Remontador`,
-        que so recomputa valores no padrao de esparsidade fixo. `beta` vindo
-        preenchido pula o `pressure_scale_factor`.
-        """
-        if element == "tri6":
-            K, M, Gx, Gy, Gvx, Gvy = assemble_tri6(X, Y, IEN, npoints, nnodes)
-        else:
-            K, M, Gx, Gy, Gvx, Gvy = assemble_mini(X, Y, IEN, ne, npoints)
-
-        if beta is None:
-            beta = pressure_scale_factor(K, M, Gx, Gy, dt, Re)
-
-        A = build_system_matrix(dt, Re, K, M, Gx, Gy, beta)
-        A = apply_boundary_conditions(A, vx_cc_pts, vy_cc_pts, p_cc_pts, npoints, n_extra)
-
-        return A.to_sparse_csr(), M.to_sparse_csr(), Gvx.to_sparse_csr(), Gvy.to_sparse_csr(), Gx, Gy, beta
-
-    A, M, Gvx, Gvy, Gx, Gy, beta = montar_sistema(X, Y)
+    # Montagem do sistema (assembly + matriz de bloco + condicoes de contorno).
+    # `Remontador` e' o unico caminho: monta o sistema inicial, conferindo
+    # contra a montagem de referencia (build_system_matrix +
+    # apply_boundary_conditions), e com mesh_motion remonta a cada passo so
+    # recomputando valores no padrao de esparsidade fixo.
+    remontador = Remontador(
+        dt, Re, X, Y, IEN, elemento, npoints, n_extra,
+        vx_cc_pts, vy_cc_pts, p_cc_pts)
+    A, M, beta = remontador.sistema_inicial
     print(f"Fator de escala da pressao (beta): {beta:.4f}")
+    print(f"Montagem: erro de verificacao {remontador.erro_verificacao:.1e} (vs montagem de referencia)")
 
     print(f"Tempo depois do assembly: {round(timer() - start, 2)}")
     t_assembly = timer() - start
 
-    # Com mesh_motion o sistema e' remontado a cada passo. `Remontador` captura
-    # o padrao de esparsidade + a permutacao do coalesce uma vez e nos passos
-    # seguintes so recomputa valores (pula o torch.cat de blocos, o coalesce
-    # grande e o to_sparse_csr). Verifica contra a montagem de referencia.
     mm_cfg = cfg.get("mesh_motion", {})
     mm_enabled = mm_cfg.get("enabled", False)
-    remontador = None
-    if mm_enabled:
-        remontador = Remontador(
-            dt, Re, X, Y, IEN, element, npoints, n_extra,
-            vx_cc_pts, vy_cc_pts, p_cc_pts, beta,
-            precisa_gv=(advection == "eulerian"))
-        print(f"Remontador de malha movel: erro de verificacao {remontador.erro_verificacao:.1e} "
-              f"(vs montagem de referencia)")
 
     # Registro opcional de metricas (femns.report) pra comparar simulacoes
     # entre si -- so ativa se o config tiver benchmark_xlsx, pra nao mudar
-    # nada no caminho padrao. Dx,Dy = -Gx^T,-Gy^T (sem beta -- e a restricao
-    # fisica de incompressibilidade; beta e so escala numerica do solver,
-    # ver solver.build_system_matrix) usados so pra medir divergencia por
-    # passo, nunca entram no sistema linear resolvido.
+    # nada no caminho padrao. A divergencia por passo vem de
+    # `remontador.divergencia` (D = -G^T, sem beta).
     benchmark_xlsx = cfg.get("benchmark_xlsx")
     if benchmark_xlsx:
-        Dx = (-torch.transpose(Gx, 0, 1)).coalesce().to_sparse_csr()
-        Dy = (-torch.transpose(Gy, 0, 1)).coalesce().to_sparse_csr()
         bicg_iters_hist, bicg_residual_hist = [], []
         vel_l2_hist, vel_linf_hist, div_l2_hist = [], [], []
 
@@ -236,16 +157,6 @@ def main():
 
     print(f"Tempo ate inicio das iteracoes: {round(timer() - start, 2)}")
 
-    mp_cfg = cfg.get("moving_point", {})
-    ponto = mp_cfg.get("node_index")
-    mp_enabled = mp_cfg.get("enabled", False) and ponto is not None
-    amplitude_factor = mp_cfg.get("amplitude_factor", 0.1)
-    omega = mp_cfg.get("omega", np.pi * 200)
-
-    if mp_enabled:
-        ponto_x0, ponto_y0 = X[ponto].item(), Y[ponto].item()
-        X, Y, vx, vy = mover_ponto(ponto, X, Y, vx, vy, ponto_x0, ponto_y0, NToN, 0, amplitude_factor, omega)
-
     # Oscilacao de todos os nos interiores (experimento de malha movel/ALE).
     # So nos de VERTICE que nao estao em nenhum contorno (`ccName[n] is None`):
     # os nos extras do elemento sao definidos pelos vertices e sao
@@ -254,6 +165,7 @@ def main():
     oscilacao = None
     if mm_enabled:
         mm_omega = mm_cfg.get("omega", np.pi * 200)
+        NToN = montar_NToN(mesh.IEN, npoints)  # vizinhanca: amplitude = fator x h local
         nos_interiores = np.array([n for n in range(npoints) if ccName[n] is None], dtype=int)
         oscilacao = preparar_oscilacao(
             X_np, Y_np, NToN, nos_interiores,
@@ -290,7 +202,6 @@ def main():
     # anterior, e e' nela que a interpolacao semi-Lagrangeana tem que
     # avaliar (ver semi_lagrangian.calculo_sl).
     X_campo, Y_campo = X.clone(), Y.clone()
-    wx = wy = None
 
     pbar = tqdm(range(Iter))
     for n in pbar:
@@ -302,7 +213,7 @@ def main():
             X, Y = aplicar_oscilacao(oscilacao, X, Y, n * dt)
             X, Y = atualiza_nos_extras(IEN, X, Y)
 
-            # Um elemento invertido nao levanta erro em `assembly` (que toma
+            # Um elemento invertido nao levanta erro na montagem (que toma
             # abs da area) -- entraria no sistema com Gx/Gy de sinal trocado,
             # calado. Melhor parar aqui do que produzir uma solucao errada.
             area_min = area_com_sinal(IEN, X, Y).min().item()
@@ -313,42 +224,28 @@ def main():
                 )
 
             beta_anterior = beta
-            A, M, Gvx, Gvy, Gx, Gy, beta = remontador.remontar(
+            A, M, beta = remontador.remontar(
                 X, Y, beta=(None if beta_por_passo else beta))
             if beta_por_passo and beta != beta_anterior:
                 # x0 carrega p_tilde = p / beta_anterior; o novo sistema resolve
                 # p / beta, entao reescala so o componente de pressao do warm-start.
                 x0[2 * nnodes:] *= beta_anterior / beta
-            if benchmark_xlsx:
-                Dx = (-torch.transpose(Gx, 0, 1)).coalesce().to_sparse_csr()
-                Dy = (-torch.transpose(Gy, 0, 1)).coalesce().to_sparse_csr()
 
-            # Velocidade da malha para a correcao ALE do termo convectivo
-            # (so o caminho eulerian a usa: no semi-Lagrangeano a correcao
-            # e' geometrica, via X_campo/Y_campo abaixo).
-            wx, wy = velocidade_malha(oscilacao, IEN, n * dt, nnodes, device=device)
-
-        if advection == "semi_lagrangian":
-            vx_star_np, vy_star_np = calculo_sl(
-                X.cpu().numpy(), Y.cpu().numpy(), IEN.cpu().numpy(),
-                EToE, node_to_elem, ccName, cfg["boundary"]["conditions"],
-                vx.cpu().numpy(), vy.cpu().numpy(), dt, npoints, ne,
-                fora_dominio=sl_boundary,
-                elemento=element,
-                elem_start_extra=elem_start_extra,
-                X_campo=X_campo.cpu().numpy(), Y_campo=Y_campo.cpu().numpy(),
-                bc_dirichlet=bc_dirichlet,
-            )
-            vx_star = torch.from_numpy(vx_star_np).to(device)
-            vy_star = torch.from_numpy(vy_star_np).to(device)
-        else:
-            vx_star = vy_star = None
+        # Malha movel (ALE): a correcao e' geometrica -- o campo do passo
+        # anterior e' interpolado na malha em que ele vive (X_campo/Y_campo).
+        vx_star_np, vy_star_np = calculo_sl(
+            X.cpu().numpy(), Y.cpu().numpy(), localizador,
+            vx.cpu().numpy(), vy.cpu().numpy(), dt, bc_dirichlet,
+            elemento=elemento,
+            X_campo=X_campo.cpu().numpy(), Y_campo=Y_campo.cpu().numpy(),
+        )
+        vx_star = torch.from_numpy(vx_star_np).to(device)
+        vy_star = torch.from_numpy(vy_star_np).to(device)
 
         vx, vy, p, x0, info = time_step(
-            A, M, Gvx, Gvy, vx, vy, dt,
+            A, M, vx_star, vy_star, dt,
             vx_cc, vy_cc, p_cc, vx_cc_pts, vy_cc_pts, p_cc_pts,
-            npoints, n_extra, beta=beta, x0=x0, vx_star=vx_star, vy_star=vy_star,
-            wx=wx, wy=wy, tol=bicgstab_tol, max_iter=bicgstab_max_iter,
+            npoints, n_extra, beta=beta, x0=x0, tol=bicgstab_tol, max_iter=bicgstab_max_iter,
         )
         pbar.set_postfix(bicg_iters=info["iters"], residual=f'{info["residual"]:.1e}')
 
@@ -366,19 +263,19 @@ def main():
             vel_mag = torch.sqrt(vx_sol**2 + vy_sol**2)
             vel_l2_hist.append(torch.sqrt(torch.mean(vel_mag**2)).item())
             vel_linf_hist.append(torch.max(vel_mag).item())
-            div = torch.mm(Dx, vx.unsqueeze(1)).squeeze(1) + torch.mm(Dy, vy.unsqueeze(1)).squeeze(1)
+            div = remontador.divergencia(vx, vy)
             div_l2_hist.append(torch.sqrt(torch.mean(div**2)).item())
 
         # Grava a solucao a cada `vtk_interval` iteracoes; a ultima e' sempre
         # gravada para que o estado final nao dependa de `Iter` ser multiplo
-        # do intervalo (e para `femns.plotting.ultimo_vtk` / o visualizador
+        # do intervalo (e para `femns.io.ultimo_frame` / o visualizador
         # web continuarem achando o campo final).
         if (n + 1) % vtk_interval == 0 or (n + 1) == Iter:
             updated_points[:, 0] = X[:npoints].cpu().numpy()
             updated_points[:, 1] = Y[:npoints].cpu().numpy()
 
             write_vtk(
-                os.path.join(output_dir, f"solucao -{n + 1}.vtk"),
+                caminho_frame(output_dir, n + 1),
                 updated_points,
                 mesh.raw.cells,
                 point_data={
@@ -388,18 +285,13 @@ def main():
                 },
             )
 
-        if mp_enabled:
-            X, Y, vx, vy = mover_ponto(ponto, X, Y, vx, vy, ponto_x0, ponto_y0, NToN, n * dt, amplitude_factor, omega)
-            tqdm.write(f"Posicao do ponto {ponto}: X={X[ponto]:.6f}, Y={Y[ponto]:.6f}")
-
     print(f"Tempo final: {round(timer() - start, 2)} segundos")
 
     if benchmark_xlsx:
         tempo_total = timer() - start
         dados = dict(
             timestamp=datetime.now().isoformat(timespec="seconds"),
-            mesh=cfg["mesh"], advection=advection,
-            sl_boundary=sl_boundary if advection == "semi_lagrangian" else "",
+            mesh=cfg["mesh"], advection="semi_lagrangian",
             element=element, dt=dt, reynolds=Re, iterations=Iter,
             npoints=npoints, ne=ne, device=str(device),
             tempo_total_s=round(tempo_total, 3),

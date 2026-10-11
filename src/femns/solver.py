@@ -39,7 +39,7 @@ def build_system_matrix(dt: float, Re: float, K: torch.Tensor, M: torch.Tensor,
     `beta` e o fator de `pressure_scale_factor` (1.0 = sem escala). A
     pressao fisica e p = beta * p_tilde.
 
-    Os dois assemblers (`assemble_mini`, `assemble_tri6`) montam Gx/Gy na
+    Os dois elementos (`elemento.Mini`, `elemento.Tri6`) montam Gx/Gy na
     mesma forma fraca, `INT(phi_j dN_i/dx)`, entao o bloco de continuidade
     sai como -Gx^T nos dois casos e o sistema de sela fica simetrico
     (C = B^T). Essa simetria nao e cosmetica: alimentar aqui um Gx montado
@@ -64,13 +64,10 @@ def build_system_matrix(dt: float, Re: float, K: torch.Tensor, M: torch.Tensor,
     return torch.cat([a_sup, a_mid, a_inf], dim=0).coalesce()
 
 
-def time_step(A: torch.Tensor, M: torch.Tensor, Gvx: torch.Tensor, Gvy: torch.Tensor,
-              vx: torch.Tensor, vy: torch.Tensor, dt: float,
+def time_step(A: torch.Tensor, M: torch.Tensor, vx_star: torch.Tensor, vy_star: torch.Tensor, dt: float,
               vx_cc: torch.Tensor, vy_cc: torch.Tensor, p_cc: torch.Tensor,
               vx_cc_pts: torch.Tensor, vy_cc_pts: torch.Tensor, p_cc_pts: torch.Tensor,
               npoints: int, ne: int, beta: float = 1.0, x0: torch.Tensor = None,
-              vx_star: torch.Tensor = None, vy_star: torch.Tensor = None,
-              wx: torch.Tensor = None, wy: torch.Tensor = None,
               tol: float = 1e-8, max_iter: int = 2000):
     """Avanca um passo de tempo (Euler implicito).
 
@@ -78,52 +75,21 @@ def time_step(A: torch.Tensor, M: torch.Tensor, Gvx: torch.Tensor, Gvy: torch.Te
     `x0` (solucao do passo anterior, com p ja convertida para p_tilde) como
     chute inicial - reduz bastante o numero de iteracoes entre passos.
 
-    Adveccao: se `vx_star`/`vy_star` forem passados (velocidade ja
-    interpolada no pe da caracteristica, ver `femns.semi_lagrangian`),
-    usa esse termo direto no RHS -- sem restricao de CFL. Caso
-    contrario (padrao), usa a adveccao Euleriana (`advection: eulerian` no
-    config): o termo convectivo linearizado na velocidade do passo
-    anterior, montado a partir de `vx, vy` e das matrizes `Gvx, Gvy`.
-    A matriz `A` e identica nos dois casos -- ela nunca teve termo
-    advectivo (ver docs/semi_lagrangian_strategy.pdf).
-
-    Malha movel (ALE): se `wx, wy` (velocidade da malha, ver
-    `moving_mesh.velocidade_malha`) forem passados, a adveccao Euleriana
-    usa a velocidade **relativa** `v - w` como velocidade convectiva, que
-    e' a forma ALE de `(v.grad)v` -- num referencial que se move, o que
-    transporta e' o quanto o fluido anda *em relacao a malha*. Com
-    `w = 0` (malha parada) recai exatamente no caso Euleriano. Nao tem
-    efeito no caminho semi-Lagrangeano: la a correcao de malha movel e'
-    geometrica (interpolar na malha do passo anterior, ver
-    `femns.semi_lagrangian.calculo_sl`), nao um termo a subtrair aqui.
+    Adveccao semi-Lagrangeana: `vx_star`/`vy_star` sao a velocidade do passo
+    anterior ja interpolada no pe da caracteristica (`femns.semi_lagrangian`),
+    e entram so no lado direito, `M v* / dt` -- sem restricao de CFL. A matriz
+    `A` nao tem termo advectivo. Com malha movel (ALE) a correcao tambem e'
+    toda do semi-Lagrangeano (geometrica, ver `calculo_sl`); aqui nada muda.
+    (A v1.0 tinha tambem a adveccao Euleriana explicita, removida na v2.0.)
 
     Retorna (vx, vy, p, x_next, info): os vetores fisicos com as condicoes de
     contorno aplicadas, `x_next` (vx, vy, p_tilde) para usar como `x0` no
     proximo passo, e `info` com iteracoes/residuo do BiCGSTAB.
     """
-    if vx_star is not None:
-        b_sup = (1 / dt) * torch.mm(M, vx_star.unsqueeze(1))
-        b_mid = (1 / dt) * torch.mm(M, vy_star.unsqueeze(1))
-    else:
-        # Velocidade convectiva: v (Euleriano) ou v - w (ALE, malha movel).
-        cx = vx if wx is None else vx - wx
-        cy = vy if wy is None else vy - wy
+    b_sup = (1 / dt) * torch.mm(M, vx_star.unsqueeze(1))
+    b_mid = (1 / dt) * torch.mm(M, vy_star.unsqueeze(1))
 
-        # O termo convectivo linearizado e' `vg @ w`, com
-        # `vg = diag(cx) Gvx + diag(cy) Gvy`. Aplicado a um vetor:
-        #     vg @ w == cx (.) (Gvx @ w) + cy (.) (Gvy @ w)
-        # -- calculado direto, sem materializar `diag(cx)` densa n x n
-        # (era O(n^2) de VRAM por passo; ver plano de 2026-09-07). Resultado
-        # algebricamente identico ao `torch.mm(vg, w)` anterior.
-        cx1, cy1 = cx.unsqueeze(1), cy.unsqueeze(1)
-
-        def _vg_mv(w1):
-            return cx1 * torch.mm(Gvx, w1) + cy1 * torch.mm(Gvy, w1)
-
-        b_sup = (1 / dt) * torch.mm(M, vx.unsqueeze(1)) - _vg_mv(vx.unsqueeze(1))
-        b_mid = (1 / dt) * torch.mm(M, vy.unsqueeze(1)) - _vg_mv(vy.unsqueeze(1))
-
-    b_inf = torch.zeros(npoints, dtype=vx.dtype, device=vx.device)
+    b_inf = torch.zeros(npoints, dtype=vx_star.dtype, device=vx_star.device)
 
     b_sup, b_mid = b_sup.squeeze(1), b_mid.squeeze(1)
     b_sup[vx_cc_pts] = vx_cc[vx_cc_pts]

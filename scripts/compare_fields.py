@@ -19,7 +19,7 @@ import meshio
 import numpy as np
 import yaml
 
-from femns.plotting import ultimo_vtk
+from femns.io import ultimo_frame
 
 CAMPOS = ("vx", "vy", "p")
 
@@ -64,7 +64,7 @@ def main():
     with open(args.config_b) as f:
         cfg_b = yaml.safe_load(f)
 
-    vtk_a, vtk_b = ultimo_vtk(cfg_a["output_dir"]), ultimo_vtk(cfg_b["output_dir"])
+    vtk_a, vtk_b = ultimo_frame(cfg_a["output_dir"]), ultimo_frame(cfg_b["output_dir"])
     malha_a, malha_b = meshio.read(vtk_a), meshio.read(vtk_b)
 
     if malha_a.points.shape != malha_b.points.shape:

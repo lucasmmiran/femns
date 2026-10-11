@@ -2,8 +2,8 @@ import numpy as np
 import pytest
 import torch
 
-from femns.assembly import assemble_mini, assemble_tri6
 from femns.boundary import apply_boundary_conditions
+from femns.elemento import elemento_por_nome
 from femns.mesh import elem_mini, elem_tri6
 from femns.reassembly import Remontador
 from femns.solver import build_system_matrix, pressure_scale_factor
@@ -40,15 +40,12 @@ def _monta_caso(element, nx=4, dt=0.05, Re=800.0):
     # borda esquerda (x=0) restringe vx/vy; borda direita (x=1) fixa p
     esq = torch.from_numpy(np.where(X2 < 1e-9)[0])
     dir_ = torch.from_numpy(np.where((X2 > 1 - 1e-9) & (np.arange(nnodes) < npoints))[0])
-    return dict(dt=dt, Re=Re, X=X, Y=Y, IEN=IEN, element=element, npoints=npoints,
+    return dict(dt=dt, Re=Re, X=X, Y=Y, IEN=IEN, element=elemento_por_nome(element), npoints=npoints,
                 ne=ne, nnodes=nnodes, n_extra=n_extra, vxp=esq, vyp=esq, pp=dir_)
 
 
 def _referencia(c, X, Y, beta):
-    if c["element"] == "tri6":
-        K, M, Gx, Gy, _, _ = assemble_tri6(X, Y, c["IEN"], c["npoints"], c["nnodes"])
-    else:
-        K, M, Gx, Gy, _, _ = assemble_mini(X, Y, c["IEN"], c["ne"], c["npoints"])
+    K, M, Gx, Gy = c["element"].montar(X, Y, c["IEN"], c["npoints"], c["nnodes"])
     A = build_system_matrix(c["dt"], c["Re"], K, M, Gx, Gy, beta)
     A = apply_boundary_conditions(A, c["vxp"], c["vyp"], c["pp"], c["npoints"], c["n_extra"])
     return A.to_sparse_csr(), M.coalesce().to_sparse_csr()
@@ -59,9 +56,8 @@ def test_remontador_reproduz_montagem_de_referencia(element):
     c = _monta_caso(element)
     A_ref, _ = _referencia(c, c["X"], c["Y"], 1.0)
     beta = pressure_scale_factor(*_assemble_kmgg(c, c["X"], c["Y"]), c["dt"], c["Re"])
-    R = Remontador(c["dt"], c["Re"], c["X"], c["Y"], c["IEN"], element, c["npoints"],
-                   c["n_extra"], c["vxp"], c["vyp"], c["pp"], beta,
-                   precisa_gv=(element == "mini"))
+    R = Remontador(c["dt"], c["Re"], c["X"], c["Y"], c["IEN"], c["element"], c["npoints"],
+                   c["n_extra"], c["vxp"], c["vyp"], c["pp"], beta)
     # a verificacao interna ja roda em __init__; confirma a tolerancia
     assert R.erro_verificacao is not None and R.erro_verificacao < 1e-12
 
@@ -72,10 +68,7 @@ def test_remontador_reproduz_montagem_de_referencia(element):
 
 
 def _assemble_kmgg(c, X, Y):
-    if c["element"] == "tri6":
-        K, M, Gx, Gy, _, _ = assemble_tri6(X, Y, c["IEN"], c["npoints"], c["nnodes"])
-    else:
-        K, M, Gx, Gy, _, _ = assemble_mini(X, Y, c["IEN"], c["ne"], c["npoints"])
+    K, M, Gx, Gy = c["element"].montar(X, Y, c["IEN"], c["npoints"], c["nnodes"])
     return K, M, Gx, Gy
 
 
@@ -83,8 +76,8 @@ def _assemble_kmgg(c, X, Y):
 def test_remontar_em_geometria_movida_bate_com_montagem_do_zero(element):
     c = _monta_caso(element)
     beta = pressure_scale_factor(*_assemble_kmgg(c, c["X"], c["Y"]), c["dt"], c["Re"])
-    R = Remontador(c["dt"], c["Re"], c["X"], c["Y"], c["IEN"], element, c["npoints"],
-                   c["n_extra"], c["vxp"], c["vyp"], c["pp"], beta, precisa_gv=False)
+    R = Remontador(c["dt"], c["Re"], c["X"], c["Y"], c["IEN"], c["element"], c["npoints"],
+                   c["n_extra"], c["vxp"], c["vyp"], c["pp"], beta)
 
     torch.manual_seed(0)
     dX = 0.01 * torch.randn_like(c["X"])
@@ -106,8 +99,8 @@ def test_remontar_em_geometria_movida_bate_com_montagem_do_zero(element):
 def test_remontar_e_deterministico(element):
     c = _monta_caso(element)
     beta = pressure_scale_factor(*_assemble_kmgg(c, c["X"], c["Y"]), c["dt"], c["Re"])
-    R = Remontador(c["dt"], c["Re"], c["X"], c["Y"], c["IEN"], element, c["npoints"],
-                   c["n_extra"], c["vxp"], c["vyp"], c["pp"], beta, precisa_gv=False)
+    R = Remontador(c["dt"], c["Re"], c["X"], c["Y"], c["IEN"], c["element"], c["npoints"],
+                   c["n_extra"], c["vxp"], c["vyp"], c["pp"], beta)
     Xm = c["X"] + 0.01 * torch.sin(3 * c["X"])
     v1 = R.remontar(Xm, c["Y"], beta=beta)[0].values().clone()
     v2 = R.remontar(Xm, c["Y"], beta=beta)[0].values().clone()
@@ -118,10 +111,32 @@ def test_remontar_recalcula_beta_quando_none():
     c = _monta_caso("mini")
     K, M, Gx, Gy = _assemble_kmgg(c, c["X"], c["Y"])
     beta0 = pressure_scale_factor(K, M, Gx, Gy, c["dt"], c["Re"])
-    R = Remontador(c["dt"], c["Re"], c["X"], c["Y"], c["IEN"], "mini", c["npoints"],
-                   c["n_extra"], c["vxp"], c["vyp"], c["pp"], beta0, precisa_gv=False)
+    R = Remontador(c["dt"], c["Re"], c["X"], c["Y"], c["IEN"], c["element"], c["npoints"],
+                   c["n_extra"], c["vxp"], c["vyp"], c["pp"], beta0)
     Xm = c["X"] + 0.02 * torch.sin(5 * c["X"])
     Km, Mm, Gxm, Gym = _assemble_kmgg(c, Xm, c["Y"])
     beta_ref = pressure_scale_factor(Km, Mm, Gxm, Gym, c["dt"], c["Re"])
     *_, beta_re = R.remontar(Xm, c["Y"], beta=None)
     assert abs(beta_re - beta_ref) < 1e-10
+
+
+@pytest.mark.parametrize("element", ["mini", "tri6"])
+def test_divergencia_bate_com_menos_g_transposto_e_acompanha_a_geometria(element):
+    """`divergencia` = `-(Gx^T vx + Gy^T vy)`, sem beta, na geometria da ultima
+    montagem -- depois de `remontar` tem que usar o G da malha nova."""
+    c = _monta_caso(element)
+    R = Remontador(c["dt"], c["Re"], c["X"], c["Y"], c["IEN"], c["element"], c["npoints"],
+                   c["n_extra"], c["vxp"], c["vyp"], c["pp"])
+    g = torch.Generator().manual_seed(0)
+    vx = torch.rand(c["nnodes"], dtype=torch.float64, generator=g)
+    vy = torch.rand(c["nnodes"], dtype=torch.float64, generator=g)
+
+    def esperado(X, Y):
+        _, _, Gx, Gy = _assemble_kmgg(c, X, Y)
+        return -(Gx.to_dense().T @ vx + Gy.to_dense().T @ vy)
+
+    assert torch.allclose(R.divergencia(vx, vy), esperado(c["X"], c["Y"]), atol=1e-12)
+
+    Xm = c["X"] + 0.01 * torch.sin(7.0 * c["Y"])
+    R.remontar(Xm, c["Y"])
+    assert torch.allclose(R.divergencia(vx, vy), esperado(Xm, c["Y"]), atol=1e-12)

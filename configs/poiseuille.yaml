@@ -1,3 +1,10 @@
+# Poiseuille: escoamento em canal com perfil desenvolvido imposto na entrada.
+#
+# Caso de VERIFICACAO: com o perfil parabolico ja imposto na entrada, a
+# solucao exata e' `vx(y) = 6*y*(1-y)` (vmax=1.5 no centro, media 1) em toda
+# a extensao do canal -- nao ha regiao de desenvolvimento, entao qualquer
+# desvio e' erro de discretizacao (+ erro do ALE, se `mesh_motion` ligado).
+# Ver scripts/plot_poiseuille_validacao.py.
 mesh: meshes/poiseuille.msh
 output_dir: solucoes/poiseuille
 benchmark_xlsx: solucoes/benchmarks.xlsx
@@ -6,8 +13,7 @@ simulation:
   dt: 0.001
   iterations: 1000
   reynolds: 1
-  advection: eulerian  # eulerian (padrao) ou semi_lagrangian
-  element: mini  # mini (padrao, hoje) ou tri6
+  element: mini  # mini (padrao) ou tri6
   vtk_interval: 10  # grava 1 .vtk a cada N iteracoes (padrao 10); a ultima e' sempre gravada
   solver:  # BiCGSTAB -- bloco opcional, estes sao os defaults
     tol: 1.0e-8      # residuo relativo alvo por passo de tempo
@@ -15,18 +21,21 @@ simulation:
 
 boundary:
   # Ordem de prioridade dos contornos, da mais baixa para a mais alta.
-  # Quando um nó pertence a mais de um contorno (ex.: quinas da malha),
-  # vale a condição do último nome desta lista que o contém.
+  # Quando um no pertence a mais de um contorno (ex.: quinas da malha),
+  # vale a condicao do ultimo nome desta lista que o contem.
   priority: [outlet, inlet, top, bottom]
   conditions:
-    inlet:  {vx: 1.0, vy: 0.0}
+    # Perfil de Poiseuille imposto: vmax=1.5 da velocidade media 1 (mesma
+    # vazao de uma entrada uniforme `vx: 1.0`).
+    inlet:  {vx: {perfil: parabolico, vmax: 1.5}, vy: 0.0}
     bottom: {vx: 0.0, vy: 0.0}
     top:    {vx: 0.0, vy: 0.0}
-    outlet: {p: 0.0} #Velocidade solta para que o códigogere a solução.
+    outlet: {p: 0.0}  # velocidade livre na saida
 
-# Deslocamento senoidal de um nó da malha (experimento de malha móvel).
-moving_point:
+# Malha movel (ALE): todos os nos interiores oscilam. omega da 50 passos por
+# periodo com dt=0.001 (ver "amostragem no tempo" no README).
+mesh_motion:
   enabled: false
-  node_index: 345
-  amplitude_factor: 0.1
-  omega: 628.3185307179587  # pi * 200
+  amplitude_factor: 0.3
+  omega: 125.6637061435917  # 50 passos por periodo com dt=0.001
+  seed: 0

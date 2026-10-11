@@ -1,3 +1,11 @@
+# Cavidade com tampa movel (lid-driven cavity), quadrado unitario [0,1]^2.
+#
+# Condicoes de contorno de VALIDACAO (Ghia et al. 1982): tampa com vx=1,
+# paredes com nao-escorregamento, pressao fixada num unico no de referencia
+# (`outlet`, bloco `vertex` da malha -- a cavidade fechada nao tem saida
+# fisica, so precisa fixar o "zero" da pressao). Dados de referencia a
+# Re=100 em plots/cavidade/cavidade-Re100-ghia-{vx,vy}.json; para comparar, rode com
+# `reynolds: 100`.
 mesh: meshes/lid.msh
 output_dir: solucoes/lid
 benchmark_xlsx: solucoes/benchmarks.xlsx
@@ -6,23 +14,24 @@ simulation:
   dt: 0.01
   iterations: 1000
   reynolds: 1
-  advection: eulerian  # eulerian (padrao) ou semi_lagrangian
+  element: mini  # mini (padrao) ou tri6
+  vtk_interval: 10
 
 boundary:
-  # Ordem de prioridade dos contornos, da mais baixa para a mais alta.
-  # Quando um nó pertence a mais de um contorno (ex.: quinas da malha),
-  # vale a condição do último nome desta lista que o contém.
+  # Ordem de prioridade dos contornos, da mais baixa para a mais alta: as
+  # quinas de cima ficam com a tampa (top), o no de referencia com outlet.
   priority: [left, right, bottom, top, outlet]
   conditions:
-    left:  {vx: 0.0, vy: 0.0}
+    left:   {vx: 0.0, vy: 0.0}
+    right:  {vx: 0.0, vy: 0.0}
     bottom: {vx: 0.0, vy: 0.0}
     top:    {vx: 1.0, vy: 0.0}
-    right: {vx: 0.0, vy: 0.0} 
-    outlet: {p: 0.0} #Velocidade solta para que o códigogere a solução.
+    outlet: {p: 0.0}  # no de referencia de pressao
 
-# Deslocamento senoidal de um nó da malha (experimento de malha móvel).
-moving_point:
+# Malha movel (ALE): todos os nos interiores oscilam. omega da 20 passos por
+# periodo com dt=0.01.
+mesh_motion:
   enabled: false
-  node_index: 345
-  amplitude_factor: 0.1
-  omega: 628.3185307179587  # pi * 200
+  amplitude_factor: 0.3
+  omega: 31.4159265358979  # 20 passos por periodo com dt=0.01
+  seed: 0

@@ -3,11 +3,10 @@
 Cada job roda `scripts/run_simulation.py` como subprocesso (mesmo caminho do
 CLI, sem duplicar a logica de simulacao aqui) contra um config `.yaml` gerado
 a partir do JSON recebido do formulario web. Progresso e medido contando
-`solucao -N.vtk` escritos em `output_dir` -- robusto e independente de
+frames `solucao-N.vtk` escritos em `output_dir` -- robusto e independente de
 conseguir (ou nao) parsear a barra de progresso do `tqdm` do subprocesso.
 """
 
-import glob
 import math
 import os
 import re
@@ -19,11 +18,8 @@ import uuid
 
 import yaml
 
-from femns.simconfig import solver_options
-
-CAMPOS_PERMITIDOS_ADVECTION = ("eulerian", "semi_lagrangian")
-CAMPOS_PERMITIDOS_ELEMENT = ("mini", "tri6")
-CAMPOS_PERMITIDOS_SL_BOUNDARY = ("dirichlet", "intercept")
+from femns.io import listar_frames
+from femns.simconfig import DEFAULT_VTK_INTERVAL, validar_config
 
 
 class ConfigError(ValueError):
@@ -36,7 +32,7 @@ def slugify(texto: str) -> str:
 
 
 def expected_frame_count(iterations: int, vtk_interval: int) -> int:
-    """Quantos `solucao -N.vtk` a simulacao vai escrever.
+    """Quantos frames `solucao-N.vtk` a simulacao vai escrever.
 
     `run_simulation.py` grava um a cada `vtk_interval` iteracoes e a ultima
     sempre -- entao o ultimo "balde" parcial conta, dai o `ceil`. Usado como
@@ -47,47 +43,21 @@ def expected_frame_count(iterations: int, vtk_interval: int) -> int:
 
 
 def validate_config(cfg: dict, meshes_root: str) -> None:
-    """Validacoes minimas antes de gravar o yaml e disparar o subprocesso.
+    """Valida antes de gravar o yaml e disparar o subprocesso.
 
-    Nao tenta ser exaustivo (o proprio `run_simulation.py` valida o resto,
-    ex. `element`/`sl_boundary` desconhecidos) -- so pega o que deixaria o
-    processo morrer sem escrever nenhum frame, ou aceitaria um path fora de
-    `meshes/` vindo do cliente.
+    As regras do config sao as de `femns.simconfig.validar_config` (as mesmas
+    que o `run_simulation.py` aplica); aqui so se acrescenta o que e' da GUI:
+    a malha tem que ser um arquivo existente **dentro** de `meshes/` (o nome
+    vem do cliente -- nao aceitar caminho para fora).
     """
-    mesh = cfg.get("mesh")
-    if not mesh or not isinstance(mesh, str):
-        raise ConfigError("config.mesh e obrigatorio")
-    mesh_abs = os.path.abspath(os.path.join(meshes_root, os.path.basename(mesh)))
-    if not mesh_abs.startswith(os.path.abspath(meshes_root) + os.sep) or not os.path.isfile(mesh_abs):
-        raise ConfigError(f"malha desconhecida: {mesh!r}")
-
-    sim = cfg.get("simulation", {})
-    dt = sim.get("dt")
-    iterations = sim.get("iterations")
-    reynolds = sim.get("reynolds")
-    if not isinstance(dt, (int, float)) or dt <= 0:
-        raise ConfigError("simulation.dt precisa ser um numero positivo")
-    if not isinstance(iterations, int) or iterations <= 0:
-        raise ConfigError("simulation.iterations precisa ser um inteiro positivo")
-    vtk_interval = sim.get("vtk_interval", 10)
-    if not isinstance(vtk_interval, int) or isinstance(vtk_interval, bool) or vtk_interval <= 0:
-        raise ConfigError("simulation.vtk_interval precisa ser um inteiro positivo")
     try:
-        solver_options(sim)  # valida o bloco opcional simulation.solver (tol/max_iter do BiCGSTAB)
+        validar_config(cfg)
     except ValueError as e:
         raise ConfigError(str(e)) from e
-    if not isinstance(reynolds, (int, float)) or reynolds <= 0:
-        raise ConfigError("simulation.reynolds precisa ser um numero positivo")
-    if sim.get("advection", "eulerian") not in CAMPOS_PERMITIDOS_ADVECTION:
-        raise ConfigError(f"simulation.advection invalido: {sim.get('advection')!r}")
-    if sim.get("element", "mini") not in CAMPOS_PERMITIDOS_ELEMENT:
-        raise ConfigError(f"simulation.element invalido: {sim.get('element')!r}")
-    if sim.get("sl_boundary", "intercept") not in CAMPOS_PERMITIDOS_SL_BOUNDARY:
-        raise ConfigError(f"simulation.sl_boundary invalido: {sim.get('sl_boundary')!r}")
 
-    boundary = cfg.get("boundary", {})
-    if not boundary.get("priority") or not boundary.get("conditions"):
-        raise ConfigError("boundary.priority e boundary.conditions sao obrigatorios")
+    mesh_abs = os.path.abspath(os.path.join(meshes_root, os.path.basename(cfg["mesh"])))
+    if not mesh_abs.startswith(os.path.abspath(meshes_root) + os.sep) or not os.path.isfile(mesh_abs):
+        raise ConfigError(f"malha desconhecida: {cfg['mesh']!r}")
 
 
 class Job:
@@ -105,7 +75,7 @@ class Job:
         self.started_at = time.time()
 
     def frames_done(self) -> int:
-        return len(glob.glob(os.path.join(self.output_dir, "solucao -*.vtk")))
+        return len(listar_frames(self.output_dir))
 
     def status(self) -> dict:
         returncode = self.process.poll()
@@ -195,7 +165,7 @@ class JobManager:
 
         job = Job(
             uuid.uuid4().hex[:12], label or slug, config_path, output_dir, log_path,
-            cfg["simulation"]["iterations"], cfg["simulation"].get("vtk_interval", 10), process,
+            cfg["simulation"]["iterations"], cfg["simulation"].get("vtk_interval", DEFAULT_VTK_INTERVAL), process,
         )
         with self._lock:
             self._jobs[job.id] = job

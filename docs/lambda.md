@@ -1,5 +1,14 @@
 # O clamp de coordenadas baricêntricas em `interpolar_mini`/`interpolar_tri6`
 
+> **Nota (v2.0, 11/10/2026):** documento histórico. `interpolar_mini` e
+> `interpolar_tri6` viraram `funcoes_forma` das classes `Mini`/`Tri6` em
+> `src/femns/elemento.py` (o recorte dos λ ficou em
+> `ElementoTriangular.recorta_lambdas`, a interpolação em
+> `ElementoTriangular.interpolar`); `montar_node_to_elem`/`montar_edge_to_elem`
+> viraram `mesh.montar_no_para_elem`; a advecção Euleriana citada aqui foi
+> removida (existe na tag `v1.0`); `localizar_pontos_partida` virou o método
+> `Localizador.localizar` (`semi_lagrangian.py`). As fórmulas não mudaram.
+
 Este documento existe por causa da decisão B de
 `docs/semi_lagrangian_tri6.md` §5.B: o Lucas decidiu manter, no
 `interpolar_tri6` novo, o mesmo clamp de λ que `interpolar_mini` já usava,

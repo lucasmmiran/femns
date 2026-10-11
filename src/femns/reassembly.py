@@ -1,11 +1,12 @@
-"""Remontagem barata do sistema quando so as coordenadas da malha mudam.
+"""Montagem do sistema global, com remontagem barata quando so as coordenadas mudam.
 
-Com `mesh_motion` a malha se move a cada passo e o sistema `A` precisa ser
-remontado junto. Mas a **topologia** e' invariante -- so os *valores* das
+`Remontador` e' o unico caminho de montagem da simulacao: monta o sistema
+inicial (`sistema_inicial`) e, com `mesh_motion`, remonta a cada passo
+(`remontar`). Com malha movel a **topologia** e' invariante -- so os *valores* das
 matrizes de elemento mudam. `Remontador` captura, na primeira montagem, o
 padrao de esparsidade e a permutacao do `coalesce` (o mapa "contribuicao de
 elemento -> posicao no buffer de valores CSR"); nos passos seguintes so
-recomputa os valores de elemento (`assemble_*`, barato) e faz `scatter_add`
+recomputa os valores de elemento (`elemento.montar`, barato) e faz `scatter_add`
 nos buffers CSR fixos, pulando o `torch.cat` dos 9 blocos, o `.coalesce()`
 grande e o `.to_sparse_csr()` -- o grosso do custo da remontagem.
 
@@ -16,13 +17,12 @@ O resultado e' algebricamente identico ao caminho
 
 import torch
 
-from femns.assembly import assemble_mini, assemble_tri6
 from femns.solver import pressure_scale_factor
 
 
 class _MapaCoalesce:
     """Mapeia os valores brutos de uma matriz COO (na ordem de construcao de
-    `assemble_*`, fixa dado o IEN) para os valores coalescidos, sem re-ordenar
+    `ElementoTriangular.montar`, fixa dado o IEN) para os valores coalescidos, sem re-ordenar
     a cada passo. `urow`/`ucol` sao as coordenadas dos slots coalescidos.
 
     A soma dos duplicados usa `torch.sparse_coo_tensor(...).coalesce()` (soma
@@ -45,12 +45,6 @@ class _MapaCoalesce:
             self._inv, valores_brutos, size=(self.nnz,)).coalesce().values()
 
 
-def _assemble(element, X, Y, IEN, ne, npoints, nnodes):
-    if element == "tri6":
-        return assemble_tri6(X, Y, IEN, npoints, nnodes)
-    return assemble_mini(X, Y, IEN, ne, npoints)
-
-
 def _row_ptr(rows_ordenadas: torch.Tensor, n_linhas: int) -> torch.Tensor:
     """crow (indptr) CSR a partir das linhas ja ordenadas de cada nao-zero."""
     contagem = torch.bincount(rows_ordenadas, minlength=n_linhas)
@@ -60,31 +54,35 @@ def _row_ptr(rows_ordenadas: torch.Tensor, n_linhas: int) -> torch.Tensor:
 
 
 class Remontador:
-    """Remonta `A` (CSR), `M` (CSR) e, se `precisa_gv`, `Gvx`/`Gvy` (CSR) a
-    cada passo de malha movel, so recomputando valores.
+    """Monta `A` (CSR) e `M` (CSR) -- uma vez na criacao (`sistema_inicial`) e de novo a cada passo de malha movel
+    (`remontar`), so recomputando valores.
 
-    `dt` e `Re` sao fixos ao longo da simulacao. `beta` pode variar por passo
-    (equilibracao recalculada -- ver `remontar`).
+    `dt` e `Re` sao fixos ao longo da simulacao. `beta` (equilibracao da
+    pressao, `solver.pressure_scale_factor`) e' calculado na geometria inicial
+    se nao for dado, e pode variar por passo (ver `remontar`).
+
+    `verificar=True` (padrao) confere a montagem inicial contra o caminho de
+    referencia `build_system_matrix` + `apply_boundary_conditions` -- e' a
+    garantia de que o mapa de valores esta certo; nao desligue em simulacao.
     """
 
-    def __init__(self, dt, Re, X, Y, IEN, element, npoints, n_extra,
-                 vx_cc_pts, vy_cc_pts, p_cc_pts, beta_ref, precisa_gv=False,
-                 verificar=True):
+    def __init__(self, dt, Re, X, Y, IEN, elemento, npoints, n_extra,
+                 vx_cc_pts, vy_cc_pts, p_cc_pts, beta=None, verificar=True):
         self.dt, self.Re = float(dt), float(Re)
         self.IEN = IEN
-        self.element = element
+        self.elemento = elemento  # femns.elemento.MINI ou TRI6
         self.npoints = npoints
-        self.ne = IEN.shape[0]
         self.nnodes = npoints + n_extra
-        self.precisa_gv = precisa_gv
         nn, npo = self.nnodes, npoints
         self.N = 2 * nn + npo
         dev = X.device
         dtype = X.dtype
 
-        K, M, Gx, Gy, Gvx, Gvy = _assemble(element, X, Y, IEN, self.ne, npo, nn)
+        K, M, Gx, Gy = elemento.montar(X, Y, IEN, npo, nn)
+        if beta is None:
+            beta = pressure_scale_factor(K, M, Gx, Gy, dt, Re)
 
-        # K, M, Gvx, Gvy compartilham o padrao (nn x nn); Gx, Gy compartilham (nn x npo)
+        # K, M compartilham o padrao (nn x nn); Gx, Gy compartilham (nn x npo)
         self._m_nn = _MapaCoalesce(K._indices(), nn)
         self._m_n3 = _MapaCoalesce(Gx._indices(), npo)
 
@@ -159,20 +157,25 @@ class Remontador:
         if verificar:
             from femns.boundary import apply_boundary_conditions
             from femns.solver import build_system_matrix
-            A_ref = build_system_matrix(dt, Re, K, M, Gx, Gy, beta_ref)
+            A_ref = build_system_matrix(dt, Re, K, M, Gx, Gy, beta)
             A_ref = apply_boundary_conditions(A_ref, vx_cc_pts, vy_cc_pts, p_cc_pts, npo, n_extra)
             A_ref = A_ref.to_sparse_csr()
             if not (torch.equal(A_ref.crow_indices().to(torch.int64), self._csr_crow)
                     and torch.equal(A_ref.col_indices().to(torch.int64), self._csr_col)):
                 raise AssertionError(
                     "Remontador: padrao de esparsidade nao bate com a montagem de referencia")
-            A_vals, _ = self._valores_A(K, M, Gx, Gy, beta_ref)
+            A_vals, _ = self._valores_A(K, M, Gx, Gy, beta)
             denom = A_ref.values().abs().max().clamp_min(1e-30)
             self.erro_verificacao = ((A_vals - A_ref.values()).abs().max() / denom).item()
             if self.erro_verificacao > 1e-10:
                 raise AssertionError(
                     f"Remontador: valores divergem da montagem de referencia "
                     f"(erro relativo maximo {self.erro_verificacao:.2e})")
+            del A_ref
+
+        # `(A, M, beta)` na geometria de criacao. `A` usa o
+        # buffer interno: um `remontar` posterior o sobrescreve.
+        self.sistema_inicial = self._saida(K, M, Gx, Gy, beta)
 
     def _valores_A(self, K, M, Gx, Gy, beta):
         Kc = self._m_nn.merge(K._values())
@@ -196,35 +199,44 @@ class Remontador:
         """Remonta na geometria `(X, Y)`. `beta=None` recalcula a equilibracao
         (`pressure_scale_factor`) nesta geometria; um valor fixa a escala.
 
-        Retorna `(A_csr, M_csr, Gvx_csr, Gvy_csr, Gx_coo, Gy_coo, beta)` --
-        mesma ordem de `run_simulation.montar_sistema`. `Gvx/Gvy` sao `None`
-        quando `precisa_gv=False` (caminho semi-Lagrangeano).
+        Retorna `(A_csr, M_csr, beta)` -- mesma ordem de `sistema_inicial`.
         """
-        K, M, Gx, Gy, Gvx, Gvy = _assemble(
-            self.element, X, Y, self.IEN, self.ne, self.npoints, self.nnodes)
+        K, M, Gx, Gy = self.elemento.montar(X, Y, self.IEN, self.npoints, self.nnodes)
         if beta is None:
             beta = pressure_scale_factor(K, M, Gx, Gy, self.dt, self.Re)
+        return self._saida(K, M, Gx, Gy, beta)
 
+    def _saida(self, K, M, Gx, Gy, beta):
         A_vals, Mc = self._valores_A(K, M, Gx, Gy, beta)
         A_csr = torch.sparse_csr_tensor(self._csr_crow, self._csr_col, A_vals,
                                         size=(self.N, self.N))
         M_csr = torch.sparse_csr_tensor(self._m_crow, self._m_col, Mc,
                                         size=(self.nnodes, self.nnodes))
 
-        gvx_csr = gvy_csr = None
-        if self.precisa_gv:
-            gvx_csr = torch.sparse_csr_tensor(
-                self._m_crow, self._m_col, self._m_nn.merge(Gvx._values()),
-                size=(self.nnodes, self.nnodes))
-            gvy_csr = torch.sparse_csr_tensor(
-                self._m_crow, self._m_col, self._m_nn.merge(Gvy._values()),
-                size=(self.nnodes, self.nnodes))
+        # Gx/Gy coalescidos da geometria atual, so para `divergencia` (o
+        # operador D so e' montado se alguem pedir a divergencia).
+        self._gx = self._m_n3.merge(Gx._values())
+        self._gy = self._m_n3.merge(Gy._values())
+        self._D = None
 
-        gx_coo = torch.sparse_coo_tensor(
-            torch.stack([self._m_n3.urow, self._m_n3.ucol]), self._m_n3.merge(Gx._values()),
-            size=(self.nnodes, self.npoints)).coalesce()
-        gy_coo = torch.sparse_coo_tensor(
-            torch.stack([self._m_n3.urow, self._m_n3.ucol]), self._m_n3.merge(Gy._values()),
-            size=(self.nnodes, self.npoints)).coalesce()
+        return A_csr, M_csr, beta
 
-        return A_csr, M_csr, gvx_csr, gvy_csr, gx_coo, gy_coo, beta
+    def divergencia(self, vx, vy):
+        """Divergencia discreta `D_x vx + D_y vy` da velocidade, na geometria da ultima montagem.
+
+        `D = -G^T` **sem** o fator `beta` -- e' a restricao fisica de
+        incompressibilidade; `beta` e' so escala numerica do solver (ver
+        `solver.build_system_matrix`, que usa a mesma convencao no bloco de
+        continuidade de `A`). Usada como metrica (planilha de benchmark),
+        nunca entra no sistema resolvido. Os operadores sao montados na
+        primeira chamada depois de cada montagem e reaproveitados.
+        """
+        if self._D is None:
+            indices = torch.stack([self._m_n3.urow, self._m_n3.ucol])
+            tamanho = (self.nnodes, self.npoints)
+            self._D = tuple(
+                (-torch.transpose(torch.sparse_coo_tensor(indices, g, size=tamanho).coalesce(), 0, 1))
+                .coalesce().to_sparse_csr()
+                for g in (self._gx, self._gy))
+        Dx, Dy = self._D
+        return torch.mm(Dx, vx.unsqueeze(1)).squeeze(1) + torch.mm(Dy, vy.unsqueeze(1)).squeeze(1)

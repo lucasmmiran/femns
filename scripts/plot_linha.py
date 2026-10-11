@@ -22,14 +22,7 @@ import meshio
 import numpy as np
 import yaml
 
-from femns.plotting import ultimo_vtk
-
-
-def _triangulos(malha) -> np.ndarray:
-    for cb in malha.cells:
-        if cb.type == "triangle":
-            return cb.data
-    raise ValueError("malha sem celulas 'triangle'")
+from femns.io import conectividade, numero_frame, ultimo_frame
 
 
 def interpolar_no_ponto(x, y, pts, tris, valores):
@@ -91,10 +84,10 @@ def main():
     args = parse_args()
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
-    vtk = args.vtk or ultimo_vtk(cfg["output_dir"])
+    vtk = args.vtk or ultimo_frame(cfg["output_dir"])
     malha = meshio.read(vtk)
     pts = malha.points[:, :2]
-    tris = _triangulos(malha)
+    tris = conectividade(malha.cells, "triangle")
 
     if args.campo == "mag":
         valores = np.hypot(malha.point_data["vx"], malha.point_data["vy"])
@@ -111,7 +104,7 @@ def main():
     amostras, comp = amostrar_linha(pts, tris, valores, x1, y1, x2, y2, args.n)
     n_validos = sum(1 for a in amostras if a["value"] is not None)
 
-    frame = int(vtk.rsplit("-", 1)[-1].split(".")[0])
+    frame = numero_frame(vtk)
     doc = {
         "name": args.nome,
         "campo": "|v|" if args.campo == "mag" else args.campo,

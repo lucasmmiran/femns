@@ -1,7 +1,8 @@
 import torch
 
-from femns.assembly import assemble_mini, assemble_tri6
+from femns.elemento import MINI, TRI6
 from femns.solver import build_system_matrix, time_step
+from geometrias import triangulo_mini_referencia, triangulo_tri6_referencia
 
 
 def blocos_de_acoplamento(A: torch.Tensor, n: int, m: int):
@@ -34,127 +35,48 @@ def test_sistema_de_sela_e_simetrico_c_igual_b_transposto():
     assert torch.allclose(C, B.T, atol=1e-12)
 
 
-def triangulo_de_referencia_tri6():
-    X = torch.tensor([0.0, 1.0, 0.0, 0.5, 0.5, 0.0], dtype=torch.float64)
-    Y = torch.tensor([0.0, 0.0, 1.0, 0.0, 0.5, 0.5], dtype=torch.float64)
-    IEN = torch.tensor([[0, 1, 2, 3, 4, 5]], dtype=torch.long)
-    return X, Y, IEN
-
-
 def test_tri6_e_mini_produzem_sistema_simetrico():
     """Os dois elementos montam Gx/Gy na mesma forma fraca, entao os dois geram
     um sistema de sela simetrico -- o Tri6 nao e um caso especial no solver."""
-    X6, Y6, IEN6 = triangulo_de_referencia_tri6()
-    K, M, Gx, Gy, _, _ = assemble_tri6(X6, Y6, IEN6, npoints=3, nnodes=6)
+    X6, Y6, IEN6 = triangulo_tri6_referencia()
+    K, M, Gx, Gy = TRI6.montar(X6, Y6, IEN6, npoints=3, nnodes=6)
     A = build_system_matrix(0.1, 1.0, K, M, Gx, Gy, beta=1.0)
     B, C = blocos_de_acoplamento(A, n=6, m=3)
     assert torch.allclose(C, B.T, atol=1e-12)
 
-    Xm = torch.tensor([0.0, 1.0, 0.0, 1.0 / 3.0], dtype=torch.float64)
-    Ym = torch.tensor([0.0, 0.0, 1.0, 1.0 / 3.0], dtype=torch.float64)
-    IENm = torch.tensor([[0, 1, 2, 3]], dtype=torch.long)
-    K, M, Gx, Gy, _, _ = assemble_mini(Xm, Ym, IENm, ne=1, npoints=3)
+    Xm, Ym, IENm = triangulo_mini_referencia()
+    K, M, Gx, Gy = MINI.montar(Xm, Ym, IENm, npoints=3, nnodes=4)
     A = build_system_matrix(0.1, 1.0, K, M, Gx, Gy, beta=1.0)
     B, C = blocos_de_acoplamento(A, n=4, m=3)
     assert torch.allclose(C, B.T, atol=1e-12)
 
 
-def test_time_step_ale_recai_no_euleriano_com_malha_parada():
-    """Com w = 0 a correcao ALE (v - w) tem que dar exatamente o mesmo
-    resultado de nao passar w nenhum -- garante que ligar malha movel nao
-    muda o caminho Euleriano por acidente.
-    """
-    torch.manual_seed(0)
-    npoints, ne = 4, 2
-    n = npoints + ne
+def test_time_step_lado_direito_e_m_v_estrela_sobre_dt():
+    """O lado direito do momento e' `M v* / dt` (adveccao semi-Lagrangeana).
 
+    Com `A = I` e `M = I` o sistema devolve o proprio lado direito: `v = v*/dt`
+    e `p = 0`. Os nos com Dirichlet saem com o valor prescrito.
+    """
+    n, m = 4, 2  # nos de velocidade, nos de pressao
+    N = 2 * n + m
+    A = torch.eye(N, dtype=torch.float64).to_sparse_csr()
     M = torch.eye(n, dtype=torch.float64).to_sparse_csr()
-    Gvx = torch.eye(n, dtype=torch.float64).to_sparse_csr()
-    Gvy = (2.0 * torch.eye(n, dtype=torch.float64)).to_sparse_csr()
-    A = torch.eye(2 * n + npoints, dtype=torch.float64).to_sparse_csr()
+    vx_star = torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float64)
+    vy_star = torch.tensor([-1.0, 0.5, 0.0, 2.0], dtype=torch.float64)
+    dt = 0.5
 
-    vx = torch.rand(n, dtype=torch.float64)
-    vy = torch.rand(n, dtype=torch.float64)
-    vazio_v = torch.zeros(n, dtype=torch.float64)
-    vazio_p = torch.zeros(npoints, dtype=torch.float64)
-    idx_vazio = torch.zeros(0, dtype=torch.long)
+    vx_cc = torch.zeros(n, dtype=torch.float64)
+    vx_cc[0] = 9.0
+    pts_vx = torch.tensor([0])
+    vazio = torch.tensor([], dtype=torch.long)
 
-    args = (A, M, Gvx, Gvy, vx, vy, 0.1, vazio_v, vazio_v, vazio_p,
-            idx_vazio, idx_vazio, idx_vazio, npoints, ne)
+    vx, vy, p, _, _ = time_step(
+        A, M, vx_star, vy_star, dt,
+        vx_cc, torch.zeros(n, dtype=torch.float64), torch.zeros(m, dtype=torch.float64),
+        pts_vx, vazio, vazio, npoints=m, ne=n - m)
 
-    sem_w = time_step(*args)
-    com_w_zero = time_step(*args, wx=torch.zeros(n, dtype=torch.float64),
-                            wy=torch.zeros(n, dtype=torch.float64))
+    assert torch.allclose(vx[1:], vx_star[1:] / dt)
+    assert vx[0] == 9.0
+    assert torch.allclose(vy, vy_star / dt)
+    assert torch.allclose(p, torch.zeros(m, dtype=torch.float64))
 
-    assert torch.equal(sem_w[0], com_w_zero[0])
-    assert torch.equal(sem_w[1], com_w_zero[1])
-
-
-def test_time_step_euleriano_bate_com_a_forma_diag_explicita():
-    """O termo convectivo Euleriano e' `vg @ w` com `vg = diag(cx) Gvx + diag(cy) Gvy`.
-    A implementacao (cx (.) (Gvx@w) + cy (.) (Gvy@w)) tem que dar exatamente o
-    mesmo RHS -- e portanto a mesma solucao -- que formar `vg` denso e
-    multiplicar (o caminho anterior, O(n^2) de memoria).
-    """
-    torch.manual_seed(3)
-    npoints, ne = 5, 3
-    n = npoints + ne
-    N = 2 * n + npoints
-
-    Gvx = torch.rand(n, n, dtype=torch.float64).to_sparse_csr()
-    Gvy = torch.rand(n, n, dtype=torch.float64).to_sparse_csr()
-    M = (torch.eye(n, dtype=torch.float64) + 0.1 * torch.rand(n, n, dtype=torch.float64)).to_sparse_csr()
-    A = (torch.eye(N, dtype=torch.float64) + 0.05 * torch.rand(N, N, dtype=torch.float64)).to_sparse_csr()
-
-    vx = torch.rand(n, dtype=torch.float64) + 0.5
-    vy = torch.rand(n, dtype=torch.float64) + 0.5
-    wx = 0.3 * torch.rand(n, dtype=torch.float64)
-    wy = 0.3 * torch.rand(n, dtype=torch.float64)
-    zero_v = torch.zeros(n, dtype=torch.float64)
-    zero_p = torch.zeros(npoints, dtype=torch.float64)
-    e = torch.zeros(0, dtype=torch.long)
-    dt = 0.02
-
-    vx_novo, vy_novo, p_novo, *_ = time_step(
-        A, M, Gvx, Gvy, vx, vy, dt, zero_v, zero_v, zero_p, e, e, e, npoints, ne, wx=wx, wy=wy)
-
-    # forma densa explicita do mesmo RHS
-    cx, cy = vx - wx, vy - wy
-    vg = torch.diag(cx) @ Gvx.to_dense() + torch.diag(cy) @ Gvy.to_dense()
-    b_sup = (1 / dt) * (M.to_dense() @ vx) - vg @ vx
-    b_mid = (1 / dt) * (M.to_dense() @ vy) - vg @ vy
-    b = torch.cat([b_sup, b_mid, torch.zeros(npoints, dtype=torch.float64)])
-    x_ref = torch.linalg.solve(A.to_dense(), b)
-
-    assert torch.allclose(torch.cat([vx_novo, vy_novo, p_novo]), x_ref, atol=1e-8)
-
-
-def test_time_step_ale_usa_velocidade_relativa():
-    """Passar w tem que ser equivalente a rodar sem w com o campo convectivo
-    ja deslocado: e' a definicao de usar (v - w) como velocidade convectiva.
-    Aqui `w = vx, vy` zera a velocidade relativa, entao o termo convectivo
-    some e o RHS vira so o de massa.
-    """
-    npoints, ne = 4, 2
-    n = npoints + ne
-
-    M = torch.eye(n, dtype=torch.float64).to_sparse_csr()
-    Gvx = torch.eye(n, dtype=torch.float64).to_sparse_csr()
-    Gvy = (2.0 * torch.eye(n, dtype=torch.float64)).to_sparse_csr()
-    A = torch.eye(2 * n + npoints, dtype=torch.float64).to_sparse_csr()
-
-    vx = torch.rand(n, dtype=torch.float64) + 1.0
-    vy = torch.rand(n, dtype=torch.float64) + 1.0
-    zero = torch.zeros(n, dtype=torch.float64)
-    vazio_p = torch.zeros(npoints, dtype=torch.float64)
-    idx_vazio = torch.zeros(0, dtype=torch.long)
-    dt = 0.1
-
-    # w = v -> velocidade relativa nula -> sem termo convectivo
-    vx_ale, vy_ale, *_ = time_step(
-        A, M, Gvx, Gvy, vx, vy, dt, zero, zero, vazio_p,
-        idx_vazio, idx_vazio, idx_vazio, npoints, ne, wx=vx, wy=vy)
-
-    # A = I, entao a solucao e' o proprio RHS: so (1/dt) M v
-    assert torch.allclose(vx_ale, (1 / dt) * vx)
-    assert torch.allclose(vy_ale, (1 / dt) * vy)

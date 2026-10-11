@@ -7,7 +7,6 @@ from femns.moving_mesh import (
     distancia_min_vizinhos,
     passos_por_periodo,
     preparar_oscilacao,
-    velocidade_malha,
 )
 
 
@@ -112,7 +111,7 @@ def test_direcao_e_versor():
 def test_atualiza_nos_extras_mini_recoloca_centroide():
     """Depois de mover um vertice, o no de centroide do MINI tem que voltar a
     ser a media dos 3 vertices -- se nao, ele sai de dentro do triangulo e
-    deixa de ser o DOF que `assembly.assemble_mini` assume.
+    deixa de ser o DOF que `elemento.Mini` assume.
     """
     X0, Y0, IEN0 = malha_5_nos()
     IEN, X, Y = elem_mini(IEN0, X0, Y0)
@@ -141,50 +140,6 @@ def test_atualiza_nos_extras_tri6_recoloca_pontos_medios():
         assert np.isclose(X[a23], (X[v2] + X[v3]) / 2.0)
         assert np.isclose(X[a31], (X[v3] + X[v1]) / 2.0)
         assert np.isclose(Y[a12], (Y[v1] + Y[v2]) / 2.0)
-
-
-def test_velocidade_malha_bate_com_diferenca_finita():
-    """`velocidade_malha` e' a derivada analitica de `aplicar_oscilacao`;
-    tem que bater com a derivada numerica das posicoes.
-    """
-    X0, Y0, IEN0 = malha_5_nos()
-    NToN = montar_NToN(IEN0, len(X0))
-    IEN, Xm, Ym = elem_mini(IEN0, X0, Y0)
-    nnodes = len(Xm)
-
-    osc = preparar_oscilacao(Xm, Ym, NToN, np.array([4]), fator=0.3, omega=3.0, seed=5)
-
-    t, h = 0.37, 1e-7
-    Xa, Ya = aplicar_oscilacao(osc, torch.from_numpy(Xm.copy()), torch.from_numpy(Ym.copy()), t - h)
-    Xa, Ya = atualiza_nos_extras(IEN, Xa, Ya)
-    Xb, Yb = aplicar_oscilacao(osc, torch.from_numpy(Xm.copy()), torch.from_numpy(Ym.copy()), t + h)
-    Xb, Yb = atualiza_nos_extras(IEN, Xb, Yb)
-
-    wx, wy = velocidade_malha(osc, IEN, t, nnodes)
-
-    assert np.allclose(wx.numpy(), (Xb - Xa).numpy() / (2 * h), atol=1e-6)
-    assert np.allclose(wy.numpy(), (Yb - Ya).numpy() / (2 * h), atol=1e-6)
-
-
-def test_velocidade_malha_zera_no_contorno_e_propaga_ao_centroide():
-    """Nos de contorno nao se movem (w=0); o centroide do MINI herda a media
-    das velocidades dos 3 vertices (mesma combinacao linear que define a
-    posicao dele).
-    """
-    X0, Y0, IEN0 = malha_5_nos()
-    NToN = montar_NToN(IEN0, len(X0))
-    IEN, Xm, Ym = elem_mini(IEN0, X0, Y0)
-
-    osc = preparar_oscilacao(Xm, Ym, NToN, np.array([4]), omega=3.0, seed=2)
-    wx, wy = velocidade_malha(osc, IEN, t=0.11, nnodes=len(Xm))
-
-    assert np.allclose(wx.numpy()[:4], 0.0) and np.allclose(wy.numpy()[:4], 0.0)
-    assert not np.isclose(wx[4].item(), 0.0) or not np.isclose(wy[4].item(), 0.0)
-
-    for e in range(IEN.shape[0]):
-        v1, v2, v3, c = IEN[e]
-        assert np.isclose(wx[c].item(), (wx[v1] + wx[v2] + wx[v3]).item() / 3.0)
-        assert np.isclose(wy[c].item(), (wy[v1] + wy[v2] + wy[v3]).item() / 3.0)
 
 
 def test_passos_por_periodo_detecta_o_caso_congelado():

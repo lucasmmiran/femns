@@ -1,11 +1,12 @@
 """Leitura de malha e conectividade (elemento MINI, vizinhanca de nos/elementos)."""
 
-from collections import defaultdict
 from dataclasses import dataclass
 from itertools import combinations
 
 import meshio
 import numpy as np
+
+from femns.io import blocos_do_tipo, conectividade
 
 
 @dataclass
@@ -23,24 +24,27 @@ class Mesh:
     ne: int
 
 
-def _blocos_do_tipo(raw: meshio.Mesh, tipo: str) -> list[int]:
-    """Indices (na lista de cell blocks do meshio) dos blocos de um `tipo` (ex. 'triangle').
+DIMENSAO_DO_BLOCO = {"vertex": 0, "line": 1, "triangle": 2}
 
-    Malhas do Gmsh podem ter blocos em qualquer ordem/quantidade -- ex.
-    `lid.msh` tem um bloco extra `vertex` (1 no so, ponto de referencia de
-    pressao para fixar o "zero" numa cavidade tampada sem saida fisica de
-    fluido) antes do bloco `line`, o que quebrava a leitura por indice fixo
-    (`raw.cells[0]`/`raw.cells[1]`) usada anteriormente.
+
+def nome_por_tag(raw: meshio.Mesh) -> dict:
+    """`{(dimensao, tag): nome}` dos physical groups do gmsh.
+
+    O nome sai do numero do grupo (`field_data[nome] = [tag, dim]`), e nao da
+    posicao dele em `field_data`: o gmsh nao garante tags 1..N na ordem de
+    declaracao (ex.: `inner_wall` com tag 9 declarado depois de `surface`, tag
+    8), e um mesmo numero pode existir em dimensoes diferentes.
     """
-    return [i for i, cb in enumerate(raw.cells) if cb.type == tipo]
+    return {(int(dim), int(tag)): nome for nome, (tag, dim) in raw.field_data.items()}
 
 
-def _nomes_fisicos(raw: meshio.Mesh, boundNames: list, indices_blocos: list[int]) -> list:
+def _nomes_fisicos(raw: meshio.Mesh, indices_blocos: list[int]) -> list:
     """Nome do physical group de cada celula dos blocos em `indices_blocos`, concatenados."""
+    por_tag = nome_por_tag(raw)
     nomes = []
     for i in indices_blocos:
-        tags = raw.cell_data["gmsh:physical"][i] - 1
-        nomes.extend(boundNames[tag] for tag in tags)
+        dim = DIMENSAO_DO_BLOCO[raw.cells[i].type]
+        nomes.extend(por_tag[(dim, int(tag))] for tag in raw.cell_data["gmsh:physical"][i])
     return nomes
 
 
@@ -63,16 +67,13 @@ def _mesh_from_raw(raw: meshio.Mesh) -> Mesh:
     Y = raw.points[:, 1]
     boundNames = list(raw.field_data.keys())
 
-    idx_tri = _blocos_do_tipo(raw, "triangle")
-    IEN = np.concatenate([raw.cells[i].data for i in idx_tri], axis=0)
+    IEN = conectividade(raw.cells, "triangle")
 
-    idx_line = _blocos_do_tipo(raw, "line")
-    IENbound = np.concatenate([raw.cells[i].data for i in idx_line], axis=0) if idx_line else np.empty((0, 2), dtype=int)
-    IENboundElem = _nomes_fisicos(raw, boundNames, idx_line)
+    IENbound = conectividade(raw.cells, "line", obrigatorio=False)
+    IENboundElem = _nomes_fisicos(raw, blocos_do_tipo(raw.cells, "line"))
 
-    idx_vertex = _blocos_do_tipo(raw, "vertex")
-    IENpoint = np.concatenate([raw.cells[i].data for i in idx_vertex], axis=0).reshape(-1) if idx_vertex else np.empty(0, dtype=int)
-    IENpointElem = _nomes_fisicos(raw, boundNames, idx_vertex)
+    IENpoint = conectividade(raw.cells, "vertex", obrigatorio=False).reshape(-1)
+    IENpointElem = _nomes_fisicos(raw, blocos_do_tipo(raw.cells, "vertex"))
 
     return Mesh(
         raw=raw,
@@ -113,6 +114,79 @@ def elem_mini(IEN: np.ndarray, X: np.ndarray, Y: np.ndarray):
     return IEN_new, X_new, Y_new
 
 
+@dataclass
+class Arestas:
+    """Topologia de arestas de uma malha de triangulos (so os 3 vertices).
+
+    Arestas numeradas em ordem de **primeira aparicao** varrendo `IEN`
+    elemento a elemento, face a face -- a mesma ordem em que o antigo laco de
+    `elem_tri6` criava os nos de aresta, para a numeracao do Tri6 nao mudar.
+    Face local `f` de um elemento liga os vertices locais `f` e `(f+1)%3`
+    (`(0,1), (1,2), (2,0)`): e' a mesma convencao de `montar_EToE` e da coluna
+    `3+f` do Tri6, agora por construcao (vem daqui).
+
+    - `vertices` (na, 2): os dois vertices de cada aresta, `va < vb`.
+    - `id` (ne, 3): numero da aresta da face `f` do elemento `e`.
+    - `elementos`, `faces` (na, 2): os (ate) 2 elementos que compartilham a
+      aresta e a face local dela em cada um; `-1` na 2a coluna para aresta de
+      contorno.
+    """
+
+    vertices: np.ndarray
+    id: np.ndarray
+    elementos: np.ndarray
+    faces: np.ndarray
+    _chaves: np.ndarray  # chave `va*base + vb` de cada aresta, ordenada
+    _ordem: np.ndarray   # numero da aresta de cada chave ordenada
+    _base: int
+
+    def indice(self, va: np.ndarray, vb: np.ndarray) -> np.ndarray:
+        """Numero da aresta de cada par de vertices (em qualquer ordem), vetorizado."""
+        va, vb = np.asarray(va), np.asarray(vb)
+        chave = np.minimum(va, vb).astype(np.int64) * self._base + np.maximum(va, vb)
+        pos = np.searchsorted(self._chaves, chave)
+        pos = np.minimum(pos, len(self._chaves) - 1)
+        if not np.array_equal(self._chaves[pos], chave):
+            raise KeyError("par de vertices que nao e' aresta da malha")
+        return self._ordem[pos]
+
+
+def topologia_arestas(IEN: np.ndarray) -> Arestas:
+    """Monta a topologia de arestas (`Arestas`) dos 3 primeiros nos de `IEN`, vetorizado."""
+    IEN3 = np.asarray(IEN)[:, :3].astype(np.int64)
+    ne = IEN3.shape[0]
+    base = int(IEN3.max()) + 1
+
+    a = IEN3                       # vertice local f
+    b = IEN3[:, [1, 2, 0]]         # vertice local (f+1)%3
+    lo, hi = np.minimum(a, b).ravel(), np.maximum(a, b).ravel()
+    chave = lo * base + hi         # um valor por (elemento, face), em ordem de varredura
+
+    chaves, primeiro, inv = np.unique(chave, return_index=True, return_inverse=True)
+    na = len(chaves)
+    ordem_aparicao = np.argsort(primeiro, kind="stable")   # arestas na ordem da 1a aparicao
+    numero = np.empty(na, dtype=np.int64)
+    numero[ordem_aparicao] = np.arange(na)                  # chave ordenada -> numero da aresta
+    aresta_do_slot = numero[inv]                            # (ne*3,)
+
+    vertices = np.stack([lo[primeiro], hi[primeiro]], axis=1)[ordem_aparicao]
+
+    # elementos/faces de cada aresta: agrupa os slots (e, f) por aresta
+    slots = np.argsort(aresta_do_slot, kind="stable")       # slots em ordem crescente de (e, f) dentro da aresta
+    contagem = np.bincount(aresta_do_slot, minlength=na)
+    inicio = np.concatenate([[0], np.cumsum(contagem)[:-1]])
+    elementos = np.full((na, 2), -1, dtype=np.int64)
+    faces = np.full((na, 2), -1, dtype=np.int64)
+    s1 = slots[inicio]
+    elementos[:, 0], faces[:, 0] = s1 // 3, s1 % 3
+    dupla = contagem == 2         # aresta interna (contagem > 2 seria malha nao-manifold: fica sem vizinho)
+    s2 = slots[inicio[dupla] + 1]
+    elementos[dupla, 1], faces[dupla, 1] = s2 // 3, s2 % 3
+
+    return Arestas(vertices=vertices, id=aresta_do_slot.reshape(ne, 3), elementos=elementos,
+                   faces=faces, _chaves=chaves, _ordem=numero, _base=base)
+
+
 def elem_tri6(IEN: np.ndarray, X: np.ndarray, Y: np.ndarray):
     """Adiciona os nos de aresta (ponto medio) de cada elemento, gerando a
     conectividade do elemento Tri6 (velocidade P2, pressao P1 -- Taylor-Hood).
@@ -120,62 +194,37 @@ def elem_tri6(IEN: np.ndarray, X: np.ndarray, Y: np.ndarray):
     Convencao de nos de aresta (Zienkiewicz vol. 1, cap. 8): v4 = aresta
     (v1,v2), v5 = aresta (v2,v3), v6 = aresta (v3,v1). Arestas compartilhadas
     entre elementos vizinhos reaproveitam o mesmo no -- nao duplicam, ao
-    contrario do centroide do MINI (que e proprio de cada elemento).
+    contrario do centroide do MINI (que e proprio de cada elemento). O no da
+    aresta `k` de `topologia_arestas` e' `npoints + k`.
 
     Retorna a IEN com 3 colunas extras (nos de aresta), X, Y com as
-    coordenadas dos pontos medios ao final, e `edge_para_no`: dict
-    (no_a, no_b) -> indice do no de aresta (chave ordenada, no_a<no_b) --
-    usado para estender `IENbound` com o no de aresta de cada segmento de
-    contorno (ver `estende_IENbound_tri6`).
+    coordenadas dos pontos medios ao final, e a `Arestas` da malha (usada por
+    `estende_IENbound_tri6` e para achar o no de uma aresta pelos vertices).
     """
     npoints = len(X)
-    ne = IEN.shape[0]
+    arestas = topologia_arestas(IEN)
 
-    IEN_new = np.hstack((IEN, np.zeros((ne, 3), dtype=IEN.dtype)))
+    IEN_new = np.hstack((IEN, (npoints + arestas.id).astype(IEN.dtype)))
 
-    arestas_locais = [(0, 1), (1, 2), (2, 0)]  # v4, v5, v6
-    edge_para_no = {}
-    xs, ys = [], []
-    proximo_no = npoints
+    va, vb = arestas.vertices[:, 0], arestas.vertices[:, 1]
+    X_new = np.concatenate([X, (X[va] + X[vb]) / 2.0])
+    Y_new = np.concatenate([Y, (Y[va] + Y[vb]) / 2.0])
 
-    for e, elem in enumerate(IEN):
-        for f, (a, b) in enumerate(arestas_locais):
-            va, vb = int(elem[a]), int(elem[b])
-            chave = (va, vb) if va < vb else (vb, va)
-            no = edge_para_no.get(chave)
-            if no is None:
-                no = proximo_no
-                edge_para_no[chave] = no
-                xs.append((X[va] + X[vb]) / 2.0)
-                ys.append((Y[va] + Y[vb]) / 2.0)
-                proximo_no += 1
-            IEN_new[e, 3 + f] = no
-
-    X_new = np.concatenate([X, np.array(xs, dtype=X.dtype)])
-    Y_new = np.concatenate([Y, np.array(ys, dtype=Y.dtype)])
-
-    return IEN_new, X_new, Y_new, edge_para_no
+    return IEN_new, X_new, Y_new, arestas
 
 
-def estende_IENbound_tri6(IENbound: np.ndarray, edge_para_no: dict) -> np.ndarray:
+def estende_IENbound_tri6(IENbound: np.ndarray, arestas: Arestas, npoints: int) -> np.ndarray:
     """Insere o no de aresta (ponto medio) entre os dois vertices de cada
     segmento de contorno, para a condicao de contorno tambem valer sobre o
     grau de liberdade de velocidade do meio da aresta (Tri6).
 
-    `edge_para_no` vem de `elem_tri6` -- todo segmento de `IENbound` e
-    tambem uma aresta de algum triangulo do dominio, entao ja tem entrada
-    no dict.
+    `arestas` vem de `elem_tri6` -- todo segmento de `IENbound` e tambem uma
+    aresta de algum triangulo do dominio.
 
     Retorna um array (n_segmentos, 3): [v1, no_aresta, v2].
     """
-    novo = np.empty((IENbound.shape[0], 3), dtype=IENbound.dtype)
-    for i, (a, b) in enumerate(IENbound):
-        va, vb = int(a), int(b)
-        chave = (va, vb) if va < vb else (vb, va)
-        novo[i, 0] = a
-        novo[i, 1] = edge_para_no[chave]
-        novo[i, 2] = b
-    return novo
+    no_meio = npoints + arestas.indice(IENbound[:, 0], IENbound[:, 1])
+    return np.column_stack([IENbound[:, 0], no_meio, IENbound[:, 1]]).astype(IENbound.dtype)
 
 
 def area_com_sinal(IEN, X, Y):
@@ -183,7 +232,7 @@ def area_com_sinal(IEN, X, Y):
 
     Existe para detectar **inversao de elemento** quando a malha se move
     (`moving_mesh.aplicar_oscilacao`). Isso importa porque um elemento
-    invertido nao gera erro nenhum sozinho: `assembly.assemble_mini` toma
+    invertido nao gera erro nenhum sozinho: `elemento.ElementoTriangular.geometria` toma
     `abs()` da area, mas os coeficientes `bi, ci` sao calculados sem
     `abs`, entao um elemento de orientacao trocada entra no sistema com
     `Gx`/`Gy` de sinal errado -- silenciosamente. A convencao do projeto
@@ -225,34 +274,19 @@ def atualiza_nos_extras(IEN, X, Y):
     return X, Y
 
 
-def montar_EToE(IEN: np.ndarray):
-    """Monta a matriz de elementos vizinhos por face.
-
-    Retorna:
-        EToE: array (n_elementos, n_faces) onde EToE[e, f] e o elemento
-              vizinho na face f do elemento e, ou -1 se f e contorno.
-        faces_locais: definicao das faces locais (pares de indices de no).
+def montar_EToE(IEN: np.ndarray) -> np.ndarray:
+    """Vizinhos por face: `EToE[e, f]` e' o elemento do outro lado da face `f`
+    do elemento `e`, ou -1 se `f` e' contorno. Face `f` liga os vertices locais
+    `f` e `(f+1)%3` (ver `topologia_arestas`). Usa so as 3 primeiras colunas.
     """
-    n_elem, n_nos_elem = IEN.shape
-    n_faces = n_nos_elem  # T3 -> 3 faces, Q4 -> 4 faces
-
-    faces_locais = [(i, (i + 1) % n_nos_elem) for i in range(n_nos_elem)]
-
-    face_para_elem = defaultdict(list)
-    for e, elem in enumerate(IEN):
-        for f, (a, b) in enumerate(faces_locais):
-            face = tuple(sorted([elem[a], elem[b]]))
-            face_para_elem[face].append((e, f))
-
-    EToE = np.full((n_elem, n_faces), -1, dtype=int)
-
-    for face, elems in face_para_elem.items():
-        if len(elems) == 2:  # face interna
-            (e1, f1), (e2, f2) = elems
-            EToE[e1, f1] = e2
-            EToE[e2, f2] = e1
-
-    return EToE, faces_locais
+    ar = topologia_arestas(IEN)
+    EToE = np.full((np.asarray(IEN).shape[0], 3), -1, dtype=int)
+    interna = ar.elementos[:, 1] != -1
+    e1, f1 = ar.elementos[interna, 0], ar.faces[interna, 0]
+    e2, f2 = ar.elementos[interna, 1], ar.faces[interna, 1]
+    EToE[e1, f1] = e2
+    EToE[e2, f2] = e1
+    return EToE
 
 
 def montar_NToN(IEN: np.ndarray, n_nos: int):
@@ -270,48 +304,20 @@ def montar_NToN(IEN: np.ndarray, n_nos: int):
     return NToN
 
 
-def montar_node_to_elem(IEN: np.ndarray, npoints: int):
-    """Monta, para cada no de vertice, o indice de um elemento que o contem.
+def montar_no_para_elem(IEN: np.ndarray, nnodes: int) -> np.ndarray:
+    """Para cada no (vertices e nos extras), o primeiro elemento que o contem.
 
-    So cobre os `npoints` nos "reais" (vertices, sem o centroide/bolha
-    do elemento MINI) -- e um chute inicial barato para busca por
-    caminhada em malha (ex.: localizacao de ponto em metodos
-    semi-Lagrangeanos), nao precisa ser o unico elemento vizinho.
+    Chute inicial da busca por caminhada do semi-Lagrangeano
+    (`semi_lagrangian.calculo_sl`): o pe da caracteristica de um no costuma
+    cair perto dele. Vale para qualquer `IEN` (so vertices, MINI ou Tri6):
+    o centroide do MINI so aparece no proprio elemento, e o no de aresta do
+    Tri6 pega o primeiro dos (ate) 2 elementos que o compartilham -- qualquer
+    um serve, a caminhada corrige. No que nao aparece em `IEN` fica -1.
     """
-    node_to_elem = np.full(npoints, -1, dtype=int)
-    for e, elem in enumerate(IEN):
-        for a in elem:
-            if node_to_elem[a] == -1:
-                node_to_elem[a] = e
-
-    return node_to_elem
-
-
-def montar_edge_to_elem(IEN: np.ndarray, npoints: int, n_extra: int):
-    """Monta, para cada no de aresta do elemento Tri6, o indice de um elemento que o contem.
-
-    Analogo a `montar_node_to_elem`, mas para os nos extras de aresta do
-    Tri6 (colunas 3:6 de `IEN`, ja' estendida por `elem_tri6`) em vez dos
-    vertices -- chute inicial para a busca por caminhada semi-Lagrangeana
-    quando o pe da caracteristica parte de um no de aresta
-    (`semi_lagrangian.calculo_sl(elemento="tri6")`).
-
-    Ao contrario do centroide do MINI, o no de aresta e' compartilhado
-    por ate 2 elementos (`elem_tri6` deduplica), sem um deles ser "o"
-    dono natural -- por isso essa semente precisa ser construida
-    varrendo a malha, e nao inferida por indice como
-    `np.arange(ne)` faz para o centroide (`elem_start_extra` default de
-    `calculo_sl`, valido so' para o MINI). Qualquer um dos elementos que
-    compartilham a aresta serve como semente: a caminhada corrige a
-    partir dai.
-
-    Retorna um array de tamanho `n_extra`, indexado por `no - npoints`.
-    """
-    edge_to_elem = np.full(n_extra, -1, dtype=int)
-    for e, elem in enumerate(IEN):
-        for a in elem[3:6]:
-            idx = a - npoints
-            if edge_to_elem[idx] == -1:
-                edge_to_elem[idx] = e
-
-    return edge_to_elem
+    IEN = np.asarray(IEN)
+    nos = IEN.ravel()
+    elems = np.repeat(np.arange(IEN.shape[0]), IEN.shape[1])
+    unicos, primeiro = np.unique(nos, return_index=True)
+    semente = np.full(nnodes, -1, dtype=int)
+    semente[unicos] = elems[primeiro]
+    return semente

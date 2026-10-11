@@ -5,6 +5,9 @@ import os
 
 import meshio
 
+from femns.io import blocos_do_tipo, conectividade
+from femns.mesh import DIMENSAO_DO_BLOCO, nome_por_tag
+
 
 def list_meshes(root: str) -> list[dict]:
     """Lista `*.msh` em `root` com o nome de cada contorno (physical group) definido na malha.
@@ -33,9 +36,9 @@ def _tem_celulas(raw: meshio.Mesh, nome_grupo: str) -> bool:
     'triangle') junto dos nomes de contorno -- filtramos pra so sobrar o que
     de fato pode ser usado em `boundary.conditions` no config.
     """
-    tag = raw.field_data[nome_grupo][0]
+    tag, dim = raw.field_data[nome_grupo]
     for i, bloco in enumerate(raw.cells):
-        if bloco.type not in ("line", "vertex"):
+        if bloco.type not in ("line", "vertex") or DIMENSAO_DO_BLOCO[bloco.type] != dim:
             continue
         if (raw.cell_data["gmsh:physical"][i] == tag).any():
             return True
@@ -52,20 +55,15 @@ def mesh_geometry(path: str) -> dict:
     visualmente com o editor de `boundary.conditions` logo abaixo.
     """
     raw = meshio.read(path)
-    boundNames = list(raw.field_data.keys())
+    por_tag = nome_por_tag(raw)
 
-    triangles = []
-    for bloco in raw.cells:
-        if bloco.type == "triangle":
-            triangles.extend(bloco.data.tolist())
+    triangles = conectividade(raw.cells, "triangle").tolist()
 
     boundaries: dict[str, list] = {}
-    for i, bloco in enumerate(raw.cells):
-        if bloco.type != "line":
-            continue
-        tags = raw.cell_data["gmsh:physical"][i] - 1
-        for segmento, tag in zip(bloco.data.tolist(), tags):
-            nome = boundNames[tag]
+    for i in blocos_do_tipo(raw.cells, "line"):
+        tags = raw.cell_data["gmsh:physical"][i]
+        for segmento, tag in zip(raw.cells[i].data.tolist(), tags):
+            nome = por_tag[(1, int(tag))]
             boundaries.setdefault(nome, []).append(segmento)
 
     return {

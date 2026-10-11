@@ -88,13 +88,6 @@
           <h3>Métodos</h3>
           <fieldset class="grid2">
             <label class="field">
-              <span>Advecção</span>
-              <select id="f-advection">
-                <option value="eulerian">eulerian</option>
-                <option value="semi_lagrangian">semi_lagrangian</option>
-              </select>
-            </label>
-            <label class="field">
               <span>Elemento</span>
               <select id="f-element">
                 <option value="mini">mini</option>
@@ -102,13 +95,6 @@
               </select>
             </label>
           </fieldset>
-          <label class="field" id="f-sl-boundary-wrap">
-            <span>Tratamento de contorno (SL)</span>
-            <select id="f-sl-boundary">
-              <option value="intercept">intercept</option>
-              <option value="dirichlet">dirichlet</option>
-            </select>
-          </label>
 
           <h3>Solver linear (BiCGSTAB)</h3>
           <fieldset class="grid2">
@@ -127,17 +113,7 @@
           <ul id="boundary-list" class="boundary-list"></ul>
 
           <details class="advanced">
-            <summary>Avançado: ponto móvel / malha móvel</summary>
-
-            <fieldset class="advanced-block">
-              <legend>Ponto móvel (moving_point)</legend>
-              <label class="field-inline"><input id="mp-enabled" type="checkbox"> habilitado</label>
-              <div class="grid3">
-                <label class="field"><span>node_index</span><input id="mp-node" type="number" step="1" min="0" value="0"></label>
-                <label class="field"><span>amplitude_factor</span><input id="mp-amp" type="number" step="any" value="0.1"></label>
-                <label class="field"><span>omega</span><input id="mp-omega" type="number" step="any" value="628.3185307179587"></label>
-              </div>
-            </fieldset>
+            <summary>Avançado: malha móvel</summary>
 
             <fieldset class="advanced-block">
               <legend>Malha móvel (mesh_motion)</legend>

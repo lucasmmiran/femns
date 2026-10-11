@@ -6,7 +6,8 @@ import os
 
 import yaml
 
-from femns.plotting import plot_ultima_solucao, ultimo_vtk
+from femns.io import ultimo_frame
+from femns.plotting import ler_solucao, plot_solucoes
 
 
 def parse_args():
@@ -27,10 +28,10 @@ def main():
     else:
         with open(args.config) as f:
             cfg = yaml.safe_load(f)
-        vtk_path = ultimo_vtk(cfg["output_dir"])
+        vtk_path = ultimo_frame(cfg["output_dir"])
         output_dir = args.output_dir or os.path.join(cfg["output_dir"], "imagens")
 
-    caminhos = plot_ultima_solucao(vtk_path, output_dir)
+    caminhos = plot_solucoes([ler_solucao(vtk_path)], [None], output_dir)
 
     print(f"Ultima solucao: {vtk_path}")
     print("Imagens geradas:")
