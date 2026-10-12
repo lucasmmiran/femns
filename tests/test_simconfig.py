@@ -4,25 +4,32 @@ from femns.simconfig import DEFAULT_BICGSTAB_MAX_ITER, DEFAULT_BICGSTAB_TOL, sol
 
 
 def test_solver_options_default_sem_bloco():
-    assert solver_options({"dt": 0.01}) == (DEFAULT_BICGSTAB_TOL, DEFAULT_BICGSTAB_MAX_ITER, False)
+    o = solver_options({"dt": 0.01})
+    assert (o.tol, o.max_iter, o.beta_por_passo) == (DEFAULT_BICGSTAB_TOL, DEFAULT_BICGSTAB_MAX_ITER, False)
+    assert (o.metodo, o.precondicionador, o.subsolver, o.verificar_direto) == ("minres", "bloco_diagonal", "fsai", 0)
+    assert o.chebyshev == (5, 5, 10)
 
 
 def test_solver_options_bloco_vazio_cai_no_default():
-    assert solver_options({"solver": {}}) == (DEFAULT_BICGSTAB_TOL, DEFAULT_BICGSTAB_MAX_ITER, False)
+    o = solver_options({"solver": {}})
+    assert (o.tol, o.max_iter, o.beta_por_passo) == (DEFAULT_BICGSTAB_TOL, DEFAULT_BICGSTAB_MAX_ITER, False)
 
 
 def test_solver_options_le_valores():
-    assert solver_options({"solver": {"tol": 1e-6, "max_iter": 500}}) == (1e-6, 500, False)
+    o = solver_options({"solver": {"tol": 1e-6, "max_iter": 500}})
+    assert (o.tol, o.max_iter) == (1e-6, 500)
 
 
 def test_solver_options_um_valor_so_mantem_o_outro_no_default():
-    assert solver_options({"solver": {"max_iter": 5000}}) == (DEFAULT_BICGSTAB_TOL, 5000, False)
-    assert solver_options({"solver": {"tol": 1e-10}}) == (1e-10, DEFAULT_BICGSTAB_MAX_ITER, False)
+    o = solver_options({"solver": {"max_iter": 5000}})
+    assert (o.tol, o.max_iter) == (DEFAULT_BICGSTAB_TOL, 5000)
+    o = solver_options({"solver": {"tol": 1e-10}})
+    assert (o.tol, o.max_iter) == (1e-10, DEFAULT_BICGSTAB_MAX_ITER)
 
 
 def test_solver_options_beta_por_passo():
-    assert solver_options({"solver": {"beta_por_passo": True}})[2] is True
-    assert solver_options({"solver": {}})[2] is False
+    assert solver_options({"solver": {"beta_por_passo": True}}).beta_por_passo is True
+    assert solver_options({"solver": {}}).beta_por_passo is False
 
 
 def test_solver_options_rejeita_beta_por_passo_nao_bool():
@@ -32,7 +39,7 @@ def test_solver_options_rejeita_beta_por_passo_nao_bool():
 
 
 def test_solver_options_tol_inteiro_vira_float():
-    tol, _, _ = solver_options({"solver": {"tol": 1}})
+    tol = solver_options({"solver": {"tol": 1}}).tol
     assert isinstance(tol, float) and tol == 1.0
 
 
@@ -124,3 +131,47 @@ def test_elementos_do_config_batem_com_as_classes():
     from femns.simconfig import ELEMENTOS
 
     assert set(ELEMENTOS) == set(_POR_NOME)
+
+
+def test_solver_options_metodo_e_precondicionador():
+    o = solver_options({"solver": {"metodo": "minres", "precondicionador": "bloco_diagonal",
+                                   "chebyshev": {"laplaciano": 30}, "verificar_direto": 10}})
+    assert (o.metodo, o.precondicionador, o.verificar_direto) == ("minres", "bloco_diagonal", 10)
+    assert o.chebyshev == (5, 5, 30)  # passos padrao do fsai
+
+
+def test_solver_options_padroes_por_metodo_e_subsolver():
+    o = solver_options({"solver": {"metodo": "bicgstab"}})
+    assert (o.precondicionador, o.subsolver) == ("bloco_triangular", "fsai")
+    o = solver_options({"solver": {"subsolver": "chebyshev"}})
+    assert o.chebyshev == (40, 5, 80)
+    o = solver_options({"solver": {"metodo": "bicgstab", "precondicionador": "nenhum"}})  # o padrao antigo
+    assert (o.metodo, o.precondicionador) == ("bicgstab", "nenhum")
+
+
+@pytest.mark.parametrize("solver, trecho", [
+    ({"metodo": "gmres"}, "metodo"),
+    ({"precondicionador": "ilu"}, "precondicionador"),
+    ({"metodo": "minres", "precondicionador": "bloco_triangular"}, "simetrico"),
+    ({"chebyshev": {"velocidade": 0}}, "velocidade"),
+    ({"chebyshev": {"outro": 3}}, "chebyshev"),
+    ({"verificar_direto": -1}, "verificar_direto"),
+])
+def test_solver_options_rejeita_opcoes_do_solver_linear(solver, trecho):
+    with pytest.raises(ValueError, match=trecho):
+        solver_options({"solver": solver})
+
+
+def test_precondicionadores_do_config_batem_com_o_modulo():
+    from femns.precondicionadores import NOMES
+    from femns.simconfig import PRECONDICIONADORES
+
+    assert set(NOMES) == set(PRECONDICIONADORES)
+
+
+def test_subsolvers_do_config_batem_com_o_modulo():
+    from femns.precondicionadores import SUBSOLVERS as do_modulo
+    from femns.simconfig import SUBSOLVERS
+
+    assert set(do_modulo) == set(SUBSOLVERS)
+

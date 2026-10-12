@@ -2,7 +2,7 @@
 
 import torch
 
-from femns.krylov import bicgstab
+from femns.krylov import bicgstab, minres
 
 
 def pressure_scale_factor(K: torch.Tensor, M: torch.Tensor, Gx: torch.Tensor, Gy: torch.Tensor,
@@ -64,51 +64,84 @@ def build_system_matrix(dt: float, Re: float, K: torch.Tensor, M: torch.Tensor,
     return torch.cat([a_sup, a_mid, a_inf], dim=0).coalesce()
 
 
-def time_step(A: torch.Tensor, M: torch.Tensor, vx_star: torch.Tensor, vy_star: torch.Tensor, dt: float,
-              vx_cc: torch.Tensor, vy_cc: torch.Tensor, p_cc: torch.Tensor,
-              vx_cc_pts: torch.Tensor, vy_cc_pts: torch.Tensor, p_cc_pts: torch.Tensor,
-              npoints: int, ne: int, beta: float = 1.0, x0: torch.Tensor = None,
-              tol: float = 1e-8, max_iter: int = 2000):
+def solucao_direta(A: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Solucao do sistema por fatoracao direta (scipy, CPU) -- so para validacao.
+
+    E' a referencia contra a qual o resultado dos metodos iterativos e'
+    conferido (pressao inclusive: um residuo pequeno nao garante o nivel da
+    pressao, ver plano 12/10 §1.3).
+    """
+    import numpy as np
+    import scipy.sparse as sp
+    from scipy.sparse.linalg import spsolve
+
+    A = A.to_sparse_csr()
+    A_sp = sp.csr_matrix((A.values().cpu().numpy(), A.col_indices().cpu().numpy(),
+                          A.crow_indices().cpu().numpy()), shape=A.shape)
+    x = spsolve(A_sp.tocsc(), b.cpu().numpy())
+    return torch.from_numpy(np.asarray(x)).to(device=b.device, dtype=b.dtype)
+
+
+def time_step(sistema, vx_star: torch.Tensor, vy_star: torch.Tensor, dt: float,
+              npoints: int, ne: int, x0: torch.Tensor = None, metodo: str = "bicgstab",
+              precond=None, tol: float = 1e-8, max_iter: int = 2000, verificar_direto: bool = False):
     """Avanca um passo de tempo (Euler implicito).
 
-    Resolve o sistema esparso com BiCGSTAB (ver `femns.krylov`), reaproveitando
-    `x0` (solucao do passo anterior, com p ja convertida para p_tilde) como
-    chute inicial - reduz bastante o numero de iteracoes entre passos.
+    `sistema` e' o `reassembly.Sistema` da geometria deste passo (matriz com as
+    condicoes de Dirichlet eliminadas de forma simetrica, e a parcela delas no
+    lado direito). Resolve com `metodo` (`"bicgstab"` ou `"minres"`, ver
+    `femns.krylov`) e o pre-condicionador `precond` (`femns.precondicionadores`;
+    `None` = nenhum), reaproveitando `x0` (solucao do passo anterior, em
+    `p~ = p/beta`) como chute inicial.
 
     Adveccao semi-Lagrangeana: `vx_star`/`vy_star` sao a velocidade do passo
     anterior ja interpolada no pe da caracteristica (`femns.semi_lagrangian`),
-    e entram so no lado direito, `M v* / dt` -- sem restricao de CFL. A matriz
+    e entram so no lado direito, `M v*/dt` -- sem restricao de CFL. A matriz
     `A` nao tem termo advectivo. Com malha movel (ALE) a correcao tambem e'
     toda do semi-Lagrangeano (geometrica, ver `calculo_sl`); aqui nada muda.
     (A v1.0 tinha tambem a adveccao Euleriana explicita, removida na v2.0.)
 
     Retorna (vx, vy, p, x_next, info): os vetores fisicos com as condicoes de
     contorno aplicadas, `x_next` (vx, vy, p_tilde) para usar como `x0` no
-    proximo passo, e `info` com iteracoes/residuo do BiCGSTAB.
+    proximo passo, e `info` com `iters`, `residual` (o que o metodo reporta) e
+    `residual_verdadeiro` (`||b - A x|| / ||b||`, mesmo criterio para os dois
+    metodos). Com `verificar_direto=True`, tambem `erro_direto_v` e
+    `erro_direto_p`: diferenca maxima relativa contra a solucao direta
+    (`solucao_direta`), na velocidade e na pressao, e `tempo_direto` (o custo
+    dessa checagem, para ser descontado de medidas de tempo).
     """
-    b_sup = (1 / dt) * torch.mm(M, vx_star.unsqueeze(1))
-    b_mid = (1 / dt) * torch.mm(M, vy_star.unsqueeze(1))
+    M = sistema.M
+    n_vel = npoints + ne
+    b = torch.cat([(1 / dt) * torch.mm(M, vx_star.unsqueeze(1)).squeeze(1),
+                   (1 / dt) * torch.mm(M, vy_star.unsqueeze(1)).squeeze(1),
+                   torch.zeros(npoints, dtype=vx_star.dtype, device=vx_star.device)])
+    # linhas livres: b menos o que as colunas eliminadas levariam; prescritas: o valor prescrito
+    b = torch.where(sistema.eh_cc, sistema.rhs_cc, b + sistema.rhs_cc)
 
-    b_inf = torch.zeros(npoints, dtype=vx_star.dtype, device=vx_star.device)
+    if metodo == "minres":
+        x, info = minres(sistema.A, b, x0=x0, tol=tol, max_iter=max_iter, precond=precond)
+    elif metodo == "bicgstab":
+        x, info = bicgstab(sistema.A, b, x0=x0, tol=tol, max_iter=max_iter, precond=precond)
+    else:
+        raise ValueError(f"metodo desconhecido: {metodo!r} (use 'bicgstab' ou 'minres')")
 
-    b_sup, b_mid = b_sup.squeeze(1), b_mid.squeeze(1)
-    b_sup[vx_cc_pts] = vx_cc[vx_cc_pts]
-    b_mid[vy_cc_pts] = vy_cc[vy_cc_pts]
-    b_inf[p_cc_pts] = p_cc[p_cc_pts] / beta  # BC atua sobre p_tilde = p/beta
+    b_norm = torch.linalg.norm(b)
+    info["residual_verdadeiro"] = (
+        torch.linalg.norm(b - torch.mm(sistema.A, x.unsqueeze(1)).squeeze(1)) / b_norm).item() if b_norm > 0 else 0.0
 
-    b = torch.cat([b_sup, b_mid, b_inf], dim=0)
+    if verificar_direto:
+        from timeit import default_timer as timer
+        t0 = timer()
+        x_dir = solucao_direta(sistema.A, b)
+        info["erro_direto_v"] = ((x[:2 * n_vel] - x_dir[:2 * n_vel]).abs().max()
+                                 / x_dir[:2 * n_vel].abs().max().clamp_min(1e-300)).item()
+        info["erro_direto_p"] = ((x[2 * n_vel:] - x_dir[2 * n_vel:]).abs().max()
+                                 / x_dir[2 * n_vel:].abs().max().clamp_min(1e-300)).item()
+        info["tempo_direto"] = timer() - t0  # quem mede tempo de passo desconta isto
 
-    x, info = bicgstab(A, b, x0=x0, tol=tol, max_iter=max_iter)
+    x = torch.where(sistema.eh_cc, sistema.rhs_cc, x)  # valores prescritos exatos
+    vx = x[:n_vel]
+    vy = x[n_vel:2 * n_vel]
+    p = sistema.beta * x[2 * n_vel:]
 
-    vx = x[:npoints + ne]
-    vy = x[npoints + ne:2 * (npoints + ne)]
-    p_tilde = x[2 * (npoints + ne):]
-    p = beta * p_tilde
-
-    vx[vx_cc_pts] = vx_cc[vx_cc_pts]
-    vy[vy_cc_pts] = vy_cc[vy_cc_pts]
-    p[p_cc_pts] = p_cc[p_cc_pts]
-
-    x_next = torch.cat([vx, vy, p / beta])
-
-    return vx, vy, p, x_next, info
+    return vx, vy, p, x, info

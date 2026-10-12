@@ -227,22 +227,35 @@ def build_boundary_conditions(IENbound: np.ndarray, ccName: list, conditions: di
     return vx_cc, vy_cc, p_cc, vx_cc_pts, vy_cc_pts, p_cc_pts
 
 
+def _linhas_cc(vx_cc_pts, vy_cc_pts, p_cc_pts, npoints: int, ne: int) -> torch.Tensor:
+    """Indices globais (em `A`, ordem vx, vy, p) dos graus de liberdade com Dirichlet."""
+    return torch.cat([vx_cc_pts, vy_cc_pts + npoints + ne, p_cc_pts + 2 * (npoints + ne)])
+
+
 def apply_boundary_conditions(A: torch.Tensor, vx_cc_pts, vy_cc_pts, p_cc_pts, npoints: int, ne: int):
-    """Zera as linhas de A referentes as condicoes de contorno e coloca 1 na diagonal.
+    """Elimina as condicoes de Dirichlet de `A` de forma **simetrica**.
+
+    Zera a linha **e a coluna** de cada grau de liberdade prescrito e poe 1
+    na diagonal. Como a coluna tambem sai, `A` continua simetrica (requisito
+    do MINRES), e os graus de liberdade prescritos ficam desacoplados do
+    resto. A contribuicao dos valores prescritos que estava nessas colunas
+    vai para o lado direito -- ver `parcela_cc`. A solucao e' a mesma da
+    eliminacao so por linha (a versao da v1.0/v2.0); muda o arredondamento.
 
     `npoints + ne` deve ser o tamanho do bloco de velocidade (linhas/colunas
     de vx e de vy em `A`, ver `solver.build_system_matrix`). Para o MINI
     isso e `npoints + numero_de_elementos` (1 bolha por elemento); para o
     Tri6, `ne` deve ser `nnodes - npoints` (nos de aresta, nao ha relacao
     direta com o numero de elementos).
+
+    Ref.: H. C. Elman, D. J. Silvester, A. J. Wathen (2014), *Finite
+    Elements and Fast Iterative Solvers*, 2a ed., OUP, cap. 3.
     """
-    rows_vx = vx_cc_pts
-    rows_vy = vy_cc_pts + npoints + ne
-    rows_p = p_cc_pts + 2 * (npoints + ne)
-    rows_bc = torch.cat([rows_vx, rows_vy, rows_p])
+    rows_bc = _linhas_cc(vx_cc_pts, vy_cc_pts, p_cc_pts, npoints, ne)
 
     A = A.coalesce()
-    mask = ~torch.isin(A.indices()[0], rows_bc)
+    linhas, colunas = A.indices()
+    mask = ~(torch.isin(linhas, rows_bc) | torch.isin(colunas, rows_bc))
     new_indices = A.indices()[:, mask]
     new_values = A.values()[mask]
 
@@ -253,3 +266,20 @@ def apply_boundary_conditions(A: torch.Tensor, vx_cc_pts, vy_cc_pts, p_cc_pts, n
     final_values = torch.cat([new_values, diag_values])
 
     return torch.sparse_coo_tensor(final_indices, final_values, size=A.shape, device=A.device, dtype=A.dtype)
+
+
+def parcela_cc(A_completa: torch.Tensor, g: torch.Tensor, eh_cc: torch.Tensor) -> torch.Tensor:
+    """Parcela das condicoes de Dirichlet no lado direito, para a eliminacao simetrica.
+
+    `A_completa` e' a matriz **antes** de `apply_boundary_conditions`; `g`
+    tem os valores prescritos nos graus de liberdade com Dirichlet (zero no
+    resto) e `eh_cc` marca esses graus de liberdade. Devolve `c` tal que o
+    lado direito final e' `b + c` nas linhas livres e `c` nas prescritas:
+
+        c[livres]  = -(A_completa @ g)[livres]     (o que saiu das colunas)
+        c[cc]      = g[cc]                         (a linha identidade)
+
+    Referencia para a versao incremental de `reassembly.Remontador`.
+    """
+    Ag = torch.mm(A_completa, g.unsqueeze(1)).squeeze(1)
+    return torch.where(eh_cc, g, -Ag)

@@ -115,6 +115,33 @@ class ElementoTriangular:
         return (esparsa(idx_nn, k, nnodes), esparsa(idx_nn, m, nnodes),
                 esparsa(idx_n3, gx, npoints), esparsa(idx_n3, gy, npoints))
 
+    def matrizes_pressao(self, X: torch.Tensor, Y: torch.Tensor, IEN: torch.Tensor, npoints: int):
+        """Massa `Mp` e laplaciano `Lp` P1 nos vertices (espaco da pressao), COO nao coalescidas.
+
+        Iguais para MINI e Tri6 (a pressao e' P1 nos dois): so usam os 3
+        vertices de cada elemento. Por elemento,
+
+            Mp_e = (A/12) [[2, 1, 1], [1, 2, 1], [1, 1, 2]]
+            Lp_e = (b b^T + c c^T) / (4A)
+
+        Nao entram no sistema resolvido: sao os ingredientes do complemento de
+        Schur de Cahouet-Chabard usado pelos pre-condicionadores de bloco
+        (`femns.precondicionadores`).
+        """
+        device = X.device
+        geo = self.geometria(X, Y, IEN)
+        b = torch.stack([geo.bi, geo.bj, geo.bk], dim=1)
+        c = torch.stack([geo.ci, geo.cj, geo.ck], dim=1)
+
+        base_mp = torch.tensor([[2.0, 1.0, 1.0], [1.0, 2.0, 1.0], [1.0, 1.0, 2.0]], dtype=X.dtype, device=device)
+        mp = (geo.area / 12.0)[:, None, None] * base_mp
+        lp = (b[:, :, None] * b[:, None, :] + c[:, :, None] * c[:, None, :]) / (4.0 * geo.area)[:, None, None]
+
+        idx = self.indices_coo(IEN, 3, 3)
+        tamanho = (npoints, npoints)
+        return (torch.sparse_coo_tensor(idx, mp.flatten(), size=tamanho, dtype=torch.float64).to(device),
+                torch.sparse_coo_tensor(idx, lp.flatten(), size=tamanho, dtype=torch.float64).to(device))
+
     def valores_locais(self, geo: Geometria):
         """Valores das matrizes locais de todos os elementos, ja achatados:
         `K, M` com `n_nos**2` entradas por elemento e `Gx, Gy` com `3*n_nos`.

@@ -21,6 +21,8 @@ from femns.mesh import (
     read_mesh,
 )
 from femns.moving_mesh import aplicar_oscilacao, passos_por_periodo, preparar_oscilacao
+from femns.precondicionadores import DE_BLOCO, PassosChebyshev
+from femns.precondicionadores import montar as montar_precondicionador
 from femns.reassembly import Remontador
 from femns.report import salvar_resumo
 from femns.semi_lagrangian import Localizador, calculo_sl
@@ -43,6 +45,8 @@ def main():
     dt, Iter, Re = params.dt, params.iterations, params.reynolds
     element, vtk_interval = params.element, params.vtk_interval
     bicgstab_tol, bicgstab_max_iter, beta_por_passo = params.tol, params.max_iter, params.beta_por_passo
+    opcoes = params.solver
+    passos_cheb = PassosChebyshev(*opcoes.chebyshev)
     elemento = elemento_por_nome(element)  # a unica escolha do elemento: o objeto vai adiante
     output_dir = cfg["output_dir"]
 
@@ -61,7 +65,9 @@ def main():
         print('Gravacao de .vtk: a cada iteracao')
     else:
         print(f'Gravacao de .vtk: a cada {vtk_interval} iteracoes (+ a ultima)')
-    print(f'BiCGSTAB: tol={bicgstab_tol:g}, max_iter={bicgstab_max_iter}')
+    print(f'Solver linear: {opcoes.metodo}, pre-condicionador {opcoes.precondicionador} '
+          f'(sub-solver {opcoes.subsolver}), '
+          f'tol={bicgstab_tol:g}, max_iter={bicgstab_max_iter}')
     if beta_por_passo:
         print('Equilibracao de pressao: recalculada a cada passo (beta_por_passo)')
     print('\n--------------------------------------------')
@@ -110,10 +116,25 @@ def main():
     # contra a montagem de referencia (build_system_matrix +
     # apply_boundary_conditions), e com mesh_motion remonta a cada passo so
     # recomputando valores no padrao de esparsidade fixo.
+    # Saidas livres (contornos sem velocidade prescrita): Dirichlet so no Lp
+    # do pre-condicionador de bloco (ver Remontador), para ele nao ser singular
+    # quando nao ha pressao prescrita.
+    sem_velocidade = [nome for nome in set(mesh.IENboundElem)
+                      if not {"vx", "vy"} & set(cfg["boundary"]["conditions"].get(nome, {}))]
+    nos_saida_livre = np.unique(np.concatenate(
+        [mesh.IENbound[np.array(mesh.IENboundElem) == nome].ravel() for nome in sem_velocidade]
+        or [np.empty(0, dtype=int)]))
+    nos_saida_livre = nos_saida_livre[~(has_vx_bc[nos_saida_livre] | has_vy_bc[nos_saida_livre])]
+
+    # As condicoes de Dirichlet saem de A de forma simetrica (linha e coluna;
+    # a parcela delas vai para o lado direito, sistema.rhs_cc).
     remontador = Remontador(
         dt, Re, X, Y, IEN, elemento, npoints, n_extra,
-        vx_cc_pts, vy_cc_pts, p_cc_pts)
-    A, M, beta = remontador.sistema_inicial
+        vx_cc_pts, vy_cc_pts, p_cc_pts, valores_cc=(vx_cc, vy_cc, p_cc),
+        precisa_blocos=opcoes.precondicionador in DE_BLOCO, nos_saida_livre=nos_saida_livre)
+    sistema = remontador.sistema_inicial
+    beta = sistema.beta
+    precond = montar_precondicionador(opcoes.precondicionador, sistema, dt, Re, passos_cheb, opcoes.subsolver)
     print(f"Fator de escala da pressao (beta): {beta:.4f}")
     print(f"Montagem: erro de verificacao {remontador.erro_verificacao:.1e} (vs montagem de referencia)")
 
@@ -130,6 +151,7 @@ def main():
     benchmark_xlsx = cfg.get("benchmark_xlsx")
     if benchmark_xlsx:
         bicg_iters_hist, bicg_residual_hist = [], []
+        tempo_passo_hist, erro_direto_v_hist, erro_direto_p_hist = [], [], []
         vel_l2_hist, vel_linf_hist, div_l2_hist = [], [], []
 
     updated_points = mesh.raw.points.copy()
@@ -203,8 +225,11 @@ def main():
     # avaliar (ver semi_lagrangian.calculo_sl).
     X_campo, Y_campo = X.clone(), Y.clone()
 
+    sincronizar = torch.cuda.synchronize if device.type == "cuda" else (lambda: None)
+
     pbar = tqdm(range(Iter))
     for n in pbar:
+        t_passo = timer()
         if mm_enabled:
             # Move a malha para o instante deste passo e remonta o sistema na
             # geometria nova -- sem isso as matrizes ficariam as da malha
@@ -224,8 +249,9 @@ def main():
                 )
 
             beta_anterior = beta
-            A, M, beta = remontador.remontar(
-                X, Y, beta=(None if beta_por_passo else beta))
+            sistema = remontador.remontar(X, Y, beta=(None if beta_por_passo else beta))
+            beta = sistema.beta
+            precond = montar_precondicionador(opcoes.precondicionador, sistema, dt, Re, passos_cheb, opcoes.subsolver)
             if beta_por_passo and beta != beta_anterior:
                 # x0 carrega p_tilde = p / beta_anterior; o novo sistema resolve
                 # p / beta, entao reescala so o componente de pressao do warm-start.
@@ -242,12 +268,15 @@ def main():
         vx_star = torch.from_numpy(vx_star_np).to(device)
         vy_star = torch.from_numpy(vy_star_np).to(device)
 
+        verificar = opcoes.verificar_direto > 0 and (n + 1) % opcoes.verificar_direto == 0
         vx, vy, p, x0, info = time_step(
-            A, M, vx_star, vy_star, dt,
-            vx_cc, vy_cc, p_cc, vx_cc_pts, vy_cc_pts, p_cc_pts,
-            npoints, n_extra, beta=beta, x0=x0, tol=bicgstab_tol, max_iter=bicgstab_max_iter,
+            sistema, vx_star, vy_star, dt, npoints, n_extra, x0=x0,
+            metodo=opcoes.metodo, precond=precond, tol=bicgstab_tol, max_iter=bicgstab_max_iter,
+            verificar_direto=verificar,
         )
-        pbar.set_postfix(bicg_iters=info["iters"], residual=f'{info["residual"]:.1e}')
+        sincronizar()
+        tempo_passo = timer() - t_passo - info.get("tempo_direto", 0.0)  # sem a checagem de validacao
+        pbar.set_postfix(iters=info["iters"], residual=f'{info["residual_verdadeiro"]:.1e}')
 
         # O campo recem-resolvido vive na geometria deste passo: ela vira a
         # referencia de interpolacao do proximo (ver X_campo acima).
@@ -259,7 +288,11 @@ def main():
 
         if benchmark_xlsx:
             bicg_iters_hist.append(info["iters"])
-            bicg_residual_hist.append(info["residual"])
+            bicg_residual_hist.append(info["residual_verdadeiro"])
+            tempo_passo_hist.append(tempo_passo)
+            if verificar:
+                erro_direto_v_hist.append(info["erro_direto_v"])
+                erro_direto_p_hist.append(info["erro_direto_p"])
             vel_mag = torch.sqrt(vx_sol**2 + vy_sol**2)
             vel_l2_hist.append(torch.sqrt(torch.mean(vel_mag**2)).item())
             vel_linf_hist.append(torch.max(vel_mag).item())
@@ -299,6 +332,13 @@ def main():
             tempo_medio_por_iter_s=round((tempo_total - t_assembly) / Iter, 5),
             bicg_iters_media=round(sum(bicg_iters_hist) / len(bicg_iters_hist), 2),
             bicg_iters_max=max(bicg_iters_hist),
+            bicg_iters_min=min(bicg_iters_hist),
+            metodo=opcoes.metodo, precondicionador=opcoes.precondicionador, subsolver=opcoes.subsolver,
+            tempo_passo_media_s=round(sum(tempo_passo_hist) / len(tempo_passo_hist), 5),
+            tempo_passo_max_s=round(max(tempo_passo_hist), 5),
+            tempo_passo_min_s=round(min(tempo_passo_hist), 5),
+            erro_direto_v_max=max(erro_direto_v_hist) if erro_direto_v_hist else "",
+            erro_direto_p_max=max(erro_direto_p_hist) if erro_direto_p_hist else "",
             bicg_residual_media=sum(bicg_residual_hist) / len(bicg_residual_hist),
             bicg_residual_max=max(bicg_residual_hist),
             passos_nao_convergidos=sum(1 for r in bicg_residual_hist if r > bicgstab_tol),  # tol efetivo (simulation.solver.tol)

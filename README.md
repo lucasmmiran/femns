@@ -26,6 +26,8 @@ velocidade — vértices + nó de aresta —, P1 para pressão).
 │   ├── boundary.py          # condições de contorno: nomes por nó, valores, aplicação na matriz
 │   ├── moving_mesh.py        # malha móvel: oscilação de todos os nós interiores (mesh_motion)
 │   ├── solver.py             # montagem do sistema global e passo de tempo (Euler implícito)
+│   ├── krylov.py             # BiCGSTAB, MINRES, Chebyshev-Jacobi (torch puro, CPU/GPU)
+│   ├── precondicionadores.py # pré-condicionadores de bloco (Cahouet–Chabard) para o sistema de sela
 │   ├── io.py                 # escrita em VTK, nome dos frames (solucao-N.vtk) e blocos de células do meshio
 │   ├── simconfig.py          # validação do config (única, usada pelo CLI e pela GUI)
 │   ├── plotting.py           # imagens (PNG) da distribuição espacial das variáveis
@@ -34,7 +36,8 @@ velocidade — vértices + nó de aresta —, P1 para pressão).
 │   ├── run_simulation.py    # CLI: orquestra mesh → assembly → boundary → solver → io
 │   ├── run_gui.py           # CLI: sobe a interface web opcional (ver seção "Interface web")
 │   ├── plot_solution.py     # CLI: gera as imagens da última solução de uma simulação
-│   └── plot_linha.py        # CLI: amostra um campo sobre uma linha e grava .json (formato plots/)
+│   ├── plot_linha.py        # CLI: amostra um campo sobre uma linha e grava .json (formato plots/)
+│   └── benchmark_solvers.py # CLI: compara os solvers lineares com malha móvel (tempo, iterações, robustez)
 ├── tests/                    # testes unitários (conectividade, valores analíticos dos elementos MINI/Tri6, contornos)
 ├── solucoes/                  # saída dos .vtk (gerada em runtime, ignorada pelo git)
 ├── femns-gui                  # executável: wrapper de shell pra scripts/run_gui.py (ver "Interface web")
@@ -119,11 +122,17 @@ simulation:
   reynolds: 1
   element: mini  # mini (padrao) ou tri6
   vtk_interval: 10  # grava 1 .vtk a cada N iteracoes (padrao 10); a ultima e' sempre gravada
-  solver:                 # BiCGSTAB -- bloco opcional
-    tol: 1.0e-8           # residuo relativo alvo por passo (padrao 1e-8)
+  solver:                 # solver linear -- bloco opcional
+    tol: 1.0e-8           # residuo relativo verdadeiro alvo por passo (padrao 1e-8)
     max_iter: 2000        # teto de iteracoes por passo (padrao 2000)
     beta_por_passo: false # recalcular a equilibracao de pressao a cada passo
                           #   de malha movel (padrao false)
+    metodo: minres        # minres (padrao) ou bicgstab
+    precondicionador: bloco_diagonal  # bloco_diagonal (padrao com minres),
+                          #   bloco_triangular (padrao com bicgstab), jacobi ou nenhum
+    subsolver: fsai       # blocos dos pre-condicionadores de bloco: fsai (FSAI,
+                          #   GPU, padrao), chebyshev (Jacobi, GPU) ou lu (LU exata, CPU)
+    verificar_direto: 0   # a cada N passos compara com o solver direto (0 = nunca)
 
 boundary:
   priority: [outlet, inlet, top, bottom]   # do menor para o maior prioridade
@@ -271,8 +280,8 @@ benchmark_xlsx: solucoes/benchmarks.xlsx
   campo final. `vtk_interval: 1` grava todo passo (comportamento
   anterior). Não afeta a numérica — só a densidade de frames no disco e
   o custo de I/O em runs longos.
-- **`simulation.solver`** (opcional): `tol` (resíduo relativo alvo do
-  BiCGSTAB por passo de tempo, padrão `1e-8`) e `max_iter` (teto de
+- **`simulation.solver`** (opcional): `tol` (resíduo relativo
+  **verdadeiro** alvo, `‖b − Ax‖/‖b‖`, por passo de tempo, padrão `1e-8`) e `max_iter` (teto de
   iterações por passo, padrão `2000`) — os valores que antes estavam
   fixos em `solver.time_step`. Uma malha maior ou um caso mais rígido
   pode precisar de outro `max_iter` (o degrau Tri6 a Re=800 com malha
@@ -283,6 +292,33 @@ benchmark_xlsx: solucoes/benchmarks.xlsx
   recalcula `pressure_scale_factor` a cada passo (a equilibração
   `‖A_vv‖/‖(Gx;Gy)‖` afinada na geometria inicial degrada quando a malha
   deforma muito) e reescala o componente de pressão do warm-start.
+
+  **Método e pré-condicionador** (plano 12/10, `docs/planos/plano1210.md`,
+  `femns.precondicionadores`). O sistema de cada passo é um Stokes
+  generalizado (a advecção semi-Lagrangeana fica toda no lado direito), e
+  as condições de Dirichlet saem de `A` de forma simétrica (linha e
+  coluna), então `A` é simétrica e o MINRES vale para qualquer Reynolds.
+  - `metodo: bicgstab | minres` — o MINRES (Paige & Saunders 1975) usa um
+    produto matriz-vetor por iteração e tem resíduo monótono; exige
+    pré-condicionador simétrico e definido positivo.
+  - `precondicionador: bloco_triangular` (BiCGSTAB) ou `bloco_diagonal`
+    (MINRES): blocos de velocidade `F = M/dt + K/Re` e complemento de Schur
+    de Cahouet–Chabard, `S⁻¹ ≈ β⁻²((1/Re)·Mp⁻¹ + (1/dt)·Lp⁻¹)`, com `Mp`/`Lp`
+    massa e laplaciano P1 da pressão (Cahouet & Chabard 1988).
+  - `subsolver`: como cada bloco é invertido. `chebyshev` (Jacobi com
+    aceleração de Chebyshev, passos em `chebyshev: {velocidade, massa,
+    laplaciano}`, na GPU) é fraco para `F` dominado por difusão e para `Lp`;
+    `fsai` troca o Jacobi do Chebyshev por uma inversa aproximada esparsa
+    fatorada (Kolotilina & Yeremin 1993), construída e aplicada na GPU;
+    `lu` (fatoração esparsa exata, scipy, CPU, refeita a cada montagem) é
+    o mais rápido no Poiseuille e no degrau, mas a fatoração domina o passo
+    na malha da válvula. Resultados em `scripts/benchmark_solvers.py`.
+  - **Padrão: MINRES + `bloco_diagonal` + `fsai`** (M1, passos de Chebyshev
+    5/5/10). Na válvula (`valve_10g_15k`, Re 10, 700 passos, malha móvel) foi
+    o único só-GPU que convergiu em todos os passos com erro de pressão
+    ~3e-8 contra o solver direto (0,8 s/passo); o BiCGSTAB + `bloco_triangular`
+    é mais rápido, mas o erro de pressão fica ~1e4–1e5 × `tol`. Para o
+    comportamento antigo: `metodo: bicgstab, precondicionador: nenhum`.
 - **`mesh_motion` e a remontagem**: com a malha móvel o sistema `A` é
   remontado a cada passo. A topologia não muda — só os valores —, então
   `femns.reassembly.Remontador` captura o padrão de esparsidade e a
