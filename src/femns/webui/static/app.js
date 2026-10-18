@@ -2,24 +2,28 @@
 
 // ---------------------------------------------------------------------
 // tema (claro/escuro) -- o atributo data-theme ja foi aplicado inline no
-// <head> (evita flash do tema errado); aqui so sincroniza o rotulo do
+// <head> (evita flash do tema errado); aqui so sincroniza o icone do
 // botao e liga o clique.
 // ---------------------------------------------------------------------
 
 (function initTheme() {
   const KEY = "femns-theme";
   const btn = document.getElementById("theme-toggle");
+  const SUN = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>';
+  const MOON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z"/></svg>';
 
   function apply(theme) {
     document.documentElement.setAttribute("data-theme", theme);
-    if (btn) btn.textContent = theme === "light" ? "☾ escuro" : "☀ claro";
+    if (!btn) return;
+    btn.innerHTML = theme === "light" ? MOON : SUN;
+    btn.title = theme === "light" ? "Mudar para o tema escuro" : "Mudar para o tema claro";
   }
 
   apply(document.documentElement.getAttribute("data-theme") || "dark");
 
   btn?.addEventListener("click", () => {
     const next = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
-    localStorage.setItem(KEY, next);
+    try { localStorage.setItem(KEY, next); } catch (e) { /* sem storage: vale so nesta aba */ }
     apply(next);
   });
 })();
@@ -52,6 +56,7 @@ function el(tag, attrs, children) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
     if (k === "text") node.textContent = v;
+    else if (k === "html") node.innerHTML = v;
     else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
     else node.setAttribute(k, v);
   }
@@ -79,7 +84,7 @@ function slugify(s) {
     s
       .toLowerCase()
       .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[̀-ͯ]/g, "")
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/(^-|-$)/g, "") || "plot"
   );
@@ -91,11 +96,12 @@ function slugify(s) {
 const BOUNDARY_PALETTE = ["#ff6b6b", "#4f8cff", "#4caf7d", "#f5a623", "#c77dff", "#2dd4bf", "#f472b6", "#a3e635"];
 
 function boundaryColor(nome, nomesOrdenados) {
-  return BOUNDARY_PALETTE[nomesOrdenados.indexOf(nome) % BOUNDARY_PALETTE.length];
+  const i = nomesOrdenados.indexOf(nome);
+  return i < 0 ? "#8FA1B5" : BOUNDARY_PALETTE[i % BOUNDARY_PALETTE.length];
 }
 
 // Desenha o wireframe de uma malha (triangulos + arestas de contorno
-// coloridas por cima) num canvas -- usado tanto no preview pequeno quanto
+// coloridas por cima) num canvas -- usado tanto no preview do cartao quanto
 // no modal ampliado, mesma funcao pros dois. Retorna os nomes de contorno
 // (ordenados, mesma ordem = mesma cor) pra montar a legenda em seguida.
 function renderMeshWireframe(canvas, geometry) {
@@ -114,7 +120,7 @@ function renderMeshWireframe(canvas, geometry) {
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  ctx.strokeStyle = "rgba(255,255,255,0.25)";
+  ctx.strokeStyle = "rgba(233,240,246,0.22)";
   ctx.lineWidth = 0.6;
   for (const tri of geometry.triangles) {
     const [a, b, c] = tri;
@@ -131,6 +137,7 @@ function renderMeshWireframe(canvas, geometry) {
 
   const nomes = Object.keys(geometry.boundaries).sort();
   ctx.lineWidth = 3;
+  ctx.lineCap = "round";
   for (const nome of nomes) {
     ctx.strokeStyle = boundaryColor(nome, nomes);
     for (const [i, j] of geometry.boundaries[nome]) {
@@ -157,90 +164,167 @@ function renderMeshLegend(container, nomes) {
 }
 
 // ---------------------------------------------------------------------
-// abas
+// telas (barra superior)
 // ---------------------------------------------------------------------
 
+function showScreen(name, opts) {
+  for (const b of document.querySelectorAll(".tab-btn")) b.classList.toggle("active", b.dataset.screen === name);
+  for (const s of document.querySelectorAll(".screen")) s.classList.toggle("active", s.id === `screen-${name}`);
+  if (name === "resultados") Resultados.onShow(opts && opts.runId);
+}
+
 for (const btn of document.querySelectorAll(".tab-btn")) {
-  btn.addEventListener("click", () => {
-    for (const b of document.querySelectorAll(".tab-btn")) b.classList.remove("active");
-    for (const s of document.querySelectorAll(".screen")) s.classList.remove("active");
-    btn.classList.add("active");
-    document.getElementById(`screen-${btn.dataset.screen}`).classList.add("active");
-    if (btn.dataset.screen === "resultados") Resultados.onShow();
-  });
+  btn.addEventListener("click", () => showScreen(btn.dataset.screen));
 }
 
 // ===========================================================================
-// TELA: NOVA SIMULAÇÃO
+// TELA: SIMULAÇÃO
+//
+// A coluna da direita tem um cartao por simulacao: rascunhos (so no
+// navegador, guardados em localStorage) e jobs do servidor (desta sessao e
+// de sessoes anteriores, ver JobManager._carregar_historico). O formulario
+// da esquerda mostra sempre o cartao ativo: editavel para rascunho,
+// somente leitura (fieldset desabilitado) para simulacao ja lancada. O
+// rascunho ativo e' atualizado a cada edicao (`formToDraft`), entao trocar
+// de cartao e' so aplicar o config do outro (`loadIntoForm`).
 // ===========================================================================
 
 const NovaSimulacao = (() => {
+  const $ = (id) => document.getElementById(id);
+  const DRAFTS_KEY = "femns-rascunhos";
+  // nome da simulacao: "<template>_aaaammdd_hhmm" (data/hora do clique em ▶)
+  const STAMP_RE = /^(.*)_(\d{8}_\d{4})$/;
+  const DEFAULT_SIM = { dt: 0.01, iterations: 200, reynolds: 1 };
+  // pre-condicionadores aceitos por metodo (simconfig.PRECONDICIONADORES*);
+  // o primeiro e' o padrao do backend para aquele metodo
+  const PRECOND_POR_METODO = {
+    minres: ["bloco_diagonal", "jacobi", "nenhum"],
+    bicgstab: ["bloco_triangular", "bloco_diagonal", "jacobi", "nenhum"],
+  };
+  // passos de Chebyshev padrao por subsolver (simconfig.DEFAULT_CHEBYSHEV_POR_SUBSOLVER)
+  const CHEB_PADRAO = { fsai: [5, 5, 10], chebyshev: [40, 5, 80], lu: [40, 5, 80] };
+  const CHEB_CAMPOS = ["velocidade", "massa", "laplaciano"];
+  const STATUS_TXT = { draft: "rascunho", running: "rodando", finished: "concluída", failed: "falhou" };
+
   let meshes = [];
   let templateItems = []; // {kind: "curated"|"saved", name, slug?, content}
   let boundaryOrder = []; // nomes na ordem de prioridade (baixa -> alta)
-  let jobsTimer = null;
-
   const meshGeometryCache = new Map(); // nome da malha -> geometria (points/triangles/boundaries)
-  let currentMeshGeometry = null;
+
+  // rascunho: {key, templateName, loaded: {kind, name, slug}|null, baseline: string|null, cfg, error}
+  let drafts = [];
+  let jobs = []; // status vindos de /api/simulations
+  let activeKey = null;
+  const openKeys = new Set();
+  let draftSeq = 0;
+
+  const nf = new Intl.NumberFormat("pt-BR");
+  const pad = (n) => String(n).padStart(2, "0");
+  const stampOf = (d) => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
+  const hms = (s) => (s == null || !Number.isFinite(s)) ? "--:--:--"
+    : `${pad(Math.floor(s / 3600))}:${pad(Math.floor(s / 60) % 60)}:${pad(Math.floor(s % 60))}`;
+  const fmtDt = (x) => !Number.isFinite(x) ? "–" : x >= 1e-4 ? x.toFixed(4).replace(".", ",") : x.toExponential(2).replace(".", ",");
+  const fmtNum = (x) => Number.isFinite(x) ? nf.format(x) : "–";
+  const baseName = (path) => (path || "").split(/[\\/]/).pop();
+
+  const draftByKey = (key) => drafts.find((d) => d.key === key);
+  const jobByKey = (key) => jobs.find((j) => `j${j.id}` === key);
+  const activeDraft = () => draftByKey(activeKey);
 
   function currentMesh() {
-    const name = document.getElementById("f-mesh").value;
-    return meshes.find((m) => m.name === name);
+    return meshes.find((m) => m.name === $("f-mesh").value);
   }
 
-  // -- preview da malha (canvas pequeno + botao de ampliar) -------------
-
-  async function loadMeshGeometry(meshName) {
-    if (meshGeometryCache.has(meshName)) return meshGeometryCache.get(meshName);
-    const geometry = await api(`/api/meshes/${encodeURIComponent(meshName)}/geometry`);
-    meshGeometryCache.set(meshName, geometry);
-    return geometry;
+  function meshByPath(path) {
+    return meshes.find((m) => m.name === baseName(path));
   }
 
-  async function refreshMeshPreview() {
-    const mesh = currentMesh();
-    if (!mesh) return;
-    currentMeshGeometry = await loadMeshGeometry(mesh.name);
-    const nomes = renderMeshWireframe(document.getElementById("mesh-preview-canvas"), currentMeshGeometry);
-    renderMeshLegend(document.getElementById("mesh-preview-legend"), nomes);
+  // MINI: vertices + um no de bolha por elemento; Tri6: vertices + um no por aresta
+  function nodeCount(mesh, element) {
+    if (!mesh || mesh.nelements == null) return NaN;
+    return element === "tri6" ? mesh.npoints + mesh.nedges : mesh.npoints + mesh.nelements;
   }
 
-  function closeMeshModal() {
-    document.getElementById("mesh-modal").hidden = true;
+  // -- secoes (trilho) -------------------------------------------------
+
+  function showSection(sec) {
+    for (const b of document.querySelectorAll(".rail-btn")) b.classList.toggle("active", b.dataset.sec === sec);
+    for (const s of document.querySelectorAll(".section")) s.classList.toggle("active", s.dataset.sec === sec);
+    $("form-nova").scrollTop = 0;
   }
 
-  function bindMeshPreviewControls() {
-    document.getElementById("mesh-expand-btn").addEventListener("click", () => {
-      if (!currentMeshGeometry) return;
-      document.getElementById("mesh-modal").hidden = false;
-      const nomes = renderMeshWireframe(document.getElementById("mesh-modal-canvas"), currentMeshGeometry);
-      renderMeshLegend(document.getElementById("mesh-modal-legend"), nomes);
-    });
-    document.getElementById("mesh-modal-close").addEventListener("click", closeMeshModal);
-    document.getElementById("mesh-modal").addEventListener("click", (ev) => {
-      if (ev.target.id === "mesh-modal") closeMeshModal(); // clique no fundo, nao na caixa
-    });
-    document.addEventListener("keydown", (ev) => {
-      if (ev.key === "Escape") closeMeshModal();
-    });
+  // -- controles segmentados (input hidden + botoes) -------------------
+
+  function syncSegs() {
+    for (const seg of document.querySelectorAll("[data-seg-for]")) {
+      const valor = $(seg.dataset.segFor).value;
+      for (const b of seg.querySelectorAll("button")) b.classList.toggle("on", b.dataset.v === valor);
+    }
+  }
+
+  function bindSegs() {
+    for (const seg of document.querySelectorAll("[data-seg-for]")) {
+      seg.addEventListener("click", (ev) => {
+        const b = ev.target.closest("button");
+        if (!b || b.disabled) return;
+        const input = $(seg.dataset.segFor);
+        if (input.value === b.dataset.v) return;
+        input.value = b.dataset.v;
+        syncSegs();
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+    }
+  }
+
+  // -- solver: opcoes que dependem de outras ---------------------------
+
+  function fillPrecond(metodo, valor) {
+    const sel = $("f-solver-precond");
+    const opcoes = PRECOND_POR_METODO[metodo] || PRECOND_POR_METODO.minres;
+    sel.innerHTML = "";
+    for (const o of opcoes) sel.appendChild(el("option", { value: o, text: o }));
+    sel.value = opcoes.includes(valor) ? valor : opcoes[0];
+  }
+
+  function syncChebPlaceholders() {
+    const padrao = CHEB_PADRAO[$("f-solver-subsolver").value] || CHEB_PADRAO.fsai;
+    CHEB_CAMPOS.forEach((k, i) => { $(`f-cheb-${k}`).placeholder = String(padrao[i]); });
   }
 
   // -- condicoes de contorno ---------------------------------------------
 
+  function boundaryNamesForColor() {
+    const mesh = currentMesh();
+    const geo = mesh && meshGeometryCache.get(mesh.name);
+    return geo ? Object.keys(geo.boundaries).sort() : [...(mesh?.boundary_names || [])].sort();
+  }
+
+  function colorBoundaryDots() {
+    const nomes = boundaryNamesForColor();
+    for (const row of document.querySelectorAll(".boundary-row")) {
+      row.querySelector(".bc-dot").style.background = boundaryColor(row.dataset.name, nomes);
+    }
+  }
+
   function renderBoundaryList() {
-    const ul = document.getElementById("boundary-list");
+    const ul = $("boundary-list");
     ul.innerHTML = "";
     boundaryOrder.forEach((name, idx) => {
       const row = el("li", { class: "boundary-row", "data-name": name }, [
-        el("span", { class: "name", text: name }),
-        el("div", { class: "order-btns" }, [
-          el("button", { type: "button", title: "subir prioridade", onclick: () => moveBoundary(idx, -1), text: "▲" }),
-          el("button", { type: "button", title: "descer prioridade", onclick: () => moveBoundary(idx, 1), text: "▼" }),
+        el("div", { class: "bc-head" }, [
+          el("span", { class: "bc-dot" }),
+          el("span", { class: "name", text: name }),
+          el("span", { class: "bc-prio", text: `prioridade ${idx + 1}` }),
+          el("div", { class: "order-btns" }, [
+            el("button", { type: "button", title: "subir na lista (prioridade menor)", onclick: () => moveBoundary(idx, -1), text: "▲" }),
+            el("button", { type: "button", title: "descer na lista (prioridade maior)", onclick: () => moveBoundary(idx, 1), text: "▼" }),
+          ]),
         ]),
-        comp(name, "vx"), comp(name, "vy"), comp(name, "p"),
+        el("div", { class: "bc-comps" }, [comp("vx"), comp("vy"), comp("p")]),
       ]);
       ul.appendChild(row);
     });
+    colorBoundaryDots();
   }
 
   // Cada componente (vx/vy/p) de um contorno pode ser, conforme o seletor
@@ -255,7 +339,7 @@ const NovaSimulacao = (() => {
   // input de valor independente do `type`/significado atual.
   const COMP_MODOS = [["const", "núm"], ["func", "ƒ(y)"], ["parab", "parábola"]];
 
-  function comp(boundaryName, campo) {
+  function comp(campo) {
     const cb = el("input", { type: "checkbox", "data-comp": campo });
     const num = el("input", {
       type: "number", step: "any", value: "0", disabled: "disabled", class: "comp-value",
@@ -297,8 +381,12 @@ const NovaSimulacao = (() => {
   function moveBoundary(idx, delta) {
     const j = idx + delta;
     if (j < 0 || j >= boundaryOrder.length) return;
+    // preserva os valores digitados: troca a ordem e reaplica as condicoes atuais
+    const atuais = collectBoundaryConditions(true);
     [boundaryOrder[idx], boundaryOrder[j]] = [boundaryOrder[j], boundaryOrder[idx]];
     renderBoundaryList();
+    restoreBoundaryInputs(atuais);
+    formToDraft();
   }
 
   function applyBoundaryConditions(conditions, priority) {
@@ -340,7 +428,9 @@ const NovaSimulacao = (() => {
     }
   }
 
-  function collectBoundaryConditions() {
+  // `cru`: guarda o estado de todos os componentes (inclusive desmarcados),
+  // pra reconstruir a lista sem perder nada ao mudar a ordem.
+  function collectBoundaryConditions(cru) {
     const conditions = {};
     for (const row of document.querySelectorAll(".boundary-row")) {
       const nome = row.dataset.name;
@@ -349,6 +439,10 @@ const NovaSimulacao = (() => {
         const campo = label.querySelector("span").textContent;
         const cb = label.querySelector("input[type=checkbox]");
         const num = label.querySelector(".comp-value");
+        if (cru) {
+          valores[campo] = { checked: cb.checked, mode: label.dataset.mode, value: num.value };
+          continue;
+        }
         if (!cb.checked) continue;
         if (label.dataset.mode === "func") {
           const expr = num.value.trim();
@@ -365,284 +459,777 @@ const NovaSimulacao = (() => {
     return conditions;
   }
 
-  // -- malha selecionada: contorno + preview + template automatico ------
+  function restoreBoundaryInputs(cru) {
+    for (const row of document.querySelectorAll(".boundary-row")) {
+      const estado = cru[row.dataset.name] || {};
+      for (const label of row.querySelectorAll(".comp")) {
+        const s = estado[label.querySelector("span").textContent];
+        if (!s) continue;
+        const cb = label.querySelector("input[type=checkbox]");
+        const num = label.querySelector(".comp-value");
+        setCompMode(label, num, s.mode);
+        num.value = s.value;
+        cb.checked = s.checked;
+        num.disabled = !s.checked;
+        label.querySelector(".comp-mode").disabled = !s.checked;
+      }
+    }
+  }
 
-  // So o essencial de reagir a malha selecionada (contorno + preview) --
-  // sem o auto-apply de template abaixo. Usado quando a troca de malha e'
-  // efeito colateral de carregar um template (`switchMeshIfKnown`), onde
-  // reaplicar um template *diferente* do que o usuario acabou de escolher
-  // seria surpreendente (bug corrigido: selecionar uma configuracao salva
-  // cujo mesh bate com o de um template do projeto sobrescrevia a escolha
-  // do usuario de volta pro template do projeto).
+  // -- malha selecionada ---------------------------------------------------
+
+  async function loadMeshGeometry(meshName) {
+    if (meshGeometryCache.has(meshName)) return meshGeometryCache.get(meshName);
+    const geometry = await api(`/api/meshes/${encodeURIComponent(meshName)}/geometry`);
+    meshGeometryCache.set(meshName, geometry);
+    return geometry;
+  }
+
+  // So o essencial de reagir a malha selecionada (lista de contornos) --
+  // sem o auto-apply de template de `onMeshChange`. Usado quando a troca de
+  // malha e' efeito colateral de carregar um template ou trocar de cartao,
+  // onde reaplicar um template *diferente* seria surpreendente.
   function refreshMeshDependentUI() {
     const mesh = currentMesh();
     boundaryOrder = mesh ? [...mesh.boundary_names] : [];
     renderBoundaryList();
-    refreshMeshPreview().catch((e) => console.error("erro ao carregar visualização da malha:", e));
-  }
-
-  // Disparado pelo <select> de malha em si (interacao direta do usuario) --
-  // aqui sim faz sentido sugerir automaticamente o template do projeto pra
-  // essa malha.
-  function onMeshChange() {
-    refreshMeshDependentUI();
-    const mesh = currentMesh();
-    // aplica automaticamente o primeiro template *do projeto* cujo mesh bate
-    // (configuracoes salvas pelo usuario nao entram nessa selecao automatica)
-    const tpl = templateItems.find((t) => t.kind === "curated" && t.content.mesh && t.content.mesh.endsWith("/" + mesh?.name));
-    if (tpl) {
-      applyConfig(tpl.content);
-      document.getElementById("f-template").value = templateValue(tpl);
-      updateTemplateDeleteButton();
+    if (mesh) {
+      loadMeshGeometry(mesh.name)
+        .then(() => { colorBoundaryDots(); renderCards(); })
+        .catch((e) => console.error("erro ao carregar a geometria da malha:", e));
     }
   }
 
-  // Preenche o formulario inteiro a partir de um config (template do
-  // projeto ou configuracao salva, mesmo formato de `buildConfig()`) --
-  // sempre "load" completo, nao merge: campos ausentes no config (ex.
-  // mesh_motion quando o preset nao usa) voltam pro estado
-  // desligado em vez de manter o que estava preenchido antes.
+  // Disparado pelo <select> de malha em si (interacao direta do usuario) --
+  // aqui sim faz sentido sugerir o template do projeto pra essa malha.
+  function onMeshChange() {
+    refreshMeshDependentUI();
+    const mesh = currentMesh();
+    const tpl = templateItems.find((t) => t.kind === "curated" && t.content.mesh && baseName(t.content.mesh) === mesh?.name);
+    const d = activeDraft();
+    if (tpl && d) {
+      applyConfig(tpl.content);
+      $("tpl-name").value = tpl.name;
+      d.loaded = templateRef(tpl);
+      formToDraft();
+      d.baseline = JSON.stringify(d.cfg);
+      updateDirty();
+    }
+  }
+
+  function switchMeshIfKnown(meshPath) {
+    const meshName = baseName(meshPath);
+    if (meshName && meshes.some((m) => m.name === meshName)) $("f-mesh").value = meshName;
+    refreshMeshDependentUI();
+  }
+
+  // -- config <-> formulario ---------------------------------------------
+
+  // Preenche o formulario inteiro a partir de um config (template, rascunho
+  // ou simulacao lancada; mesmo formato de `buildConfig()`) -- sempre "load"
+  // completo, nao merge: campos ausentes voltam pro padrao em vez de manter
+  // o que estava preenchido antes. A malha e' trocada por quem chama.
   function applyConfig(c) {
     const sim = c.simulation || {};
-    if (sim.dt != null) document.getElementById("f-dt").value = sim.dt;
-    if (sim.iterations != null) document.getElementById("f-iterations").value = sim.iterations;
-    if (sim.reynolds != null) document.getElementById("f-reynolds").value = sim.reynolds;
+    $("f-dt").value = sim.dt ?? DEFAULT_SIM.dt;
+    $("f-iterations").value = sim.iterations ?? DEFAULT_SIM.iterations;
+    $("f-reynolds").value = sim.reynolds ?? DEFAULT_SIM.reynolds;
     // config antigo sem a chave: volta pro padrao 10 (mesmo default de
     // run_simulation.py/jobs.py), nao mantem o que estava no campo.
-    document.getElementById("f-vtk-interval").value = sim.vtk_interval ?? 10;
+    $("f-vtk-interval").value = sim.vtk_interval ?? 10;
     // `advection`/`sl_boundary`/`moving_point` de configs antigos (v1.0) sao
     // ignorados: a v2.0 so tem adveccao semi-Lagrangeana por interceptacao.
-    document.getElementById("f-element").value = sim.element || "mini";
+    $("f-element").value = sim.element || "mini";
+
     const solver = sim.solver || {};
-    document.getElementById("f-solver-tol").value = solver.tol ?? 1e-8;
-    document.getElementById("f-solver-max-iter").value = solver.max_iter ?? 2000;
+    $("f-solver-tol").value = solver.tol ?? 1e-8;
+    $("f-solver-max-iter").value = solver.max_iter ?? 2000;
+    $("f-solver-metodo").value = solver.metodo || "minres";
+    fillPrecond($("f-solver-metodo").value, solver.precondicionador);
+    $("f-solver-subsolver").value = solver.subsolver || "fsai";
+    const cheb = solver.chebyshev || {};
+    for (const k of CHEB_CAMPOS) $(`f-cheb-${k}`).value = cheb[k] ?? "";
+    syncChebPlaceholders();
+    $("f-solver-beta").checked = !!solver.beta_por_passo;
+    $("f-solver-verificar").value = solver.verificar_direto ?? 0;
 
     const boundary = c.boundary || {};
     applyBoundaryConditions(boundary.conditions, boundary.priority);
 
     const mm = c.mesh_motion || {};
-    document.getElementById("mm-enabled").checked = !!mm.enabled;
-    document.getElementById("mm-amp").value = mm.amplitude_factor ?? 0.3;
-    document.getElementById("mm-omega").value = mm.omega ?? 31.41593;
-    document.getElementById("mm-seed").value = mm.seed ?? 0;
+    $("mm-enabled").checked = !!mm.enabled;
+    $("mm-amp").value = mm.amplitude_factor ?? 0.3;
+    $("mm-omega").value = mm.omega ?? 31.41593;
+    $("mm-seed").value = mm.seed ?? 0;
+
+    syncSegs();
   }
-
-  // Troca a malha selecionada se `meshPath` (ex. "meshes/degrau.msh") for
-  // conhecida -- compartilhado entre "carregar template" e "carregar
-  // configuracao salva".
-  function switchMeshIfKnown(meshPath) {
-    const meshName = (meshPath || "").split("/").pop();
-    if (meshName && meshes.some((m) => m.name === meshName)) {
-      document.getElementById("f-mesh").value = meshName;
-      refreshMeshDependentUI();
-    }
-  }
-
-  // -- template (unifica templates do projeto + configuracoes salvas) ---
-
-  function templateValue(item) {
-    return item.kind === "curated" ? `curated:${item.name}` : `saved:${item.slug}`;
-  }
-
-  function findTemplate(value) {
-    return templateItems.find((t) => templateValue(t) === value);
-  }
-
-  function updateTemplateDeleteButton() {
-    const sel = document.getElementById("f-template");
-    const item = findTemplate(sel.value);
-    document.getElementById("f-template-delete").disabled = !item || item.kind !== "saved";
-  }
-
-  async function loadTemplates() {
-    const [curated, saved] = await Promise.all([api("/api/configs"), api("/api/saved-configs")]);
-    templateItems = [
-      ...curated.map((t) => ({ kind: "curated", name: t.name, content: t.content })),
-      ...saved.map((s) => ({ kind: "saved", name: s.name, slug: s.slug, content: s.content })),
-    ];
-
-    const sel = document.getElementById("f-template");
-    const prev = sel.value;
-    sel.innerHTML = "";
-    sel.appendChild(el("option", { value: "", text: "— nenhum —" }));
-
-    const grupoProjeto = el("optgroup", { label: "Templates do projeto" });
-    const grupoSalvos = el("optgroup", { label: "Configurações salvas" });
-    for (const item of templateItems) {
-      const opt = el("option", { value: templateValue(item), text: item.name });
-      (item.kind === "curated" ? grupoProjeto : grupoSalvos).appendChild(opt);
-    }
-    if (grupoProjeto.children.length) sel.appendChild(grupoProjeto);
-    if (grupoSalvos.children.length) sel.appendChild(grupoSalvos);
-
-    if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
-    updateTemplateDeleteButton();
-  }
-
-  function bindTemplateControls() {
-    const sel = document.getElementById("f-template");
-    sel.addEventListener("change", () => {
-      updateTemplateDeleteButton();
-      const item = findTemplate(sel.value);
-      if (!item) return;
-      switchMeshIfKnown(item.content.mesh);
-      document.getElementById("f-label").value = item.name;
-      applyConfig(item.content);
-    });
-
-    document.getElementById("f-template-delete").addEventListener("click", async () => {
-      const item = findTemplate(sel.value);
-      if (!item || item.kind !== "saved") return;
-      if (!window.confirm(`Excluir o template salvo "${item.name}"?`)) return;
-      await api(`/api/saved-configs/${item.slug}`, { method: "DELETE" });
-      sel.value = "";
-      await loadTemplates();
-    });
-
-    document.getElementById("f-save-config").addEventListener("click", async () => {
-      const errorBox = document.getElementById("form-error");
-      const okBox = document.getElementById("save-ok");
-      errorBox.hidden = true;
-      okBox.hidden = true;
-      const nome = document.getElementById("f-label").value.trim();
-      if (!nome) {
-        errorBox.textContent = "Preencha o Rótulo antes de salvar.";
-        errorBox.hidden = false;
-        return;
-      }
-      try {
-        const res = await api("/api/saved-configs", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: nome, config: buildConfig() }),
-        });
-        await loadTemplates();
-        sel.value = `saved:${res.slug}`;
-        updateTemplateDeleteButton();
-        okBox.textContent = `Template "${nome}" salvo.`;
-        okBox.hidden = false;
-      } catch (e) {
-        errorBox.textContent = e.message;
-        errorBox.hidden = false;
-      }
-    });
-  }
-
-  // -- montagem do config / envio ----------------------------------------
 
   function buildConfig() {
     const mesh = currentMesh();
+    if (!mesh) return null;
+    const solver = {
+      tol: parseFloat($("f-solver-tol").value),
+      max_iter: parseInt($("f-solver-max-iter").value, 10),
+      metodo: $("f-solver-metodo").value,
+      precondicionador: $("f-solver-precond").value,
+      subsolver: $("f-solver-subsolver").value,
+    };
+    // passos de Chebyshev: so os preenchidos (vazio = padrao do subsolver)
+    const cheb = {};
+    for (const k of CHEB_CAMPOS) {
+      const v = parseInt($(`f-cheb-${k}`).value, 10);
+      if (Number.isFinite(v)) cheb[k] = v;
+    }
+    if (Object.keys(cheb).length) solver.chebyshev = cheb;
+    if ($("f-solver-beta").checked) solver.beta_por_passo = true;
+    const verificar = parseInt($("f-solver-verificar").value, 10);
+    if (verificar > 0) solver.verificar_direto = verificar;
+
     const cfg = {
       mesh: mesh.name,
       simulation: {
-        dt: parseFloat(document.getElementById("f-dt").value),
-        iterations: parseInt(document.getElementById("f-iterations").value, 10),
-        reynolds: parseFloat(document.getElementById("f-reynolds").value),
-        element: document.getElementById("f-element").value,
-        vtk_interval: parseInt(document.getElementById("f-vtk-interval").value, 10),
-        solver: {
-          tol: parseFloat(document.getElementById("f-solver-tol").value),
-          max_iter: parseInt(document.getElementById("f-solver-max-iter").value, 10),
-        },
+        dt: parseFloat($("f-dt").value),
+        iterations: parseInt($("f-iterations").value, 10),
+        reynolds: parseFloat($("f-reynolds").value),
+        element: $("f-element").value,
+        vtk_interval: parseInt($("f-vtk-interval").value, 10),
+        solver,
       },
       boundary: {
-        priority: boundaryOrder,
+        priority: [...boundaryOrder],
         conditions: collectBoundaryConditions(),
       },
     };
 
-    if (document.getElementById("mm-enabled").checked) {
+    if ($("mm-enabled").checked) {
       cfg.mesh_motion = {
         enabled: true,
-        amplitude_factor: parseFloat(document.getElementById("mm-amp").value),
-        omega: parseFloat(document.getElementById("mm-omega").value),
-        seed: parseInt(document.getElementById("mm-seed").value, 10),
+        amplitude_factor: parseFloat($("mm-amp").value),
+        omega: parseFloat($("mm-omega").value),
+        seed: parseInt($("mm-seed").value, 10),
       };
     }
     return cfg;
   }
 
-  async function onSubmit(ev) {
-    ev.preventDefault();
-    const errorBox = document.getElementById("form-error");
-    errorBox.hidden = true;
-    document.getElementById("save-ok").hidden = true;
-    try {
-      const config = buildConfig();
-      const label = document.getElementById("f-label").value.trim();
-      await api("/api/simulations", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ config, label: label || undefined }),
-      });
-      refreshJobs();
-    } catch (e) {
-      errorBox.textContent = e.message;
-      errorBox.hidden = false;
+  // passos de tempo por periodo da oscilacao da malha (abaixo de 4 o
+  // run_simulation.py aborta por aliasing; abaixo de 10, avisa)
+  function passosPorPeriodo(omega, dt) {
+    return 2 * Math.PI / (omega * dt);
+  }
+
+  // textos que dependem de varios campos (mostram o que esta no formulario,
+  // inclusive em modo somente leitura)
+  function updateDerived() {
+    const mesh = currentMesh();
+    const element = $("f-element").value;
+    $("mesh-info").innerHTML = !mesh ? "" : (
+      `<span>elementos <b>${fmtNum(mesh.nelements)}</b></span>` +
+      `<span>vértices <b>${fmtNum(mesh.npoints)}</b></span>` +
+      `<span>arestas <b>${fmtNum(mesh.nedges)}</b></span>` +
+      `<span>nós (${element === "tri6" ? "Tri6" : "MINI"}) <b>${fmtNum(nodeCount(mesh, element))}</b></span>`);
+
+    const dt = parseFloat($("f-dt").value);
+    const it = parseInt($("f-iterations").value, 10);
+    const vtk = parseInt($("f-vtk-interval").value, 10);
+    const tFinal = dt * it;
+    const quadros = Math.ceil(it / vtk);
+    $("param-summary").innerHTML = `Tempo final <b>t = ${Number.isFinite(tFinal) ? tFinal.toLocaleString("pt-BR", { maximumFractionDigits: 6 }) : "–"}</b>` +
+      ` · <b>${Number.isFinite(quadros) ? nf.format(quadros) : "–"}</b> arquivos .vtk`;
+
+    const box = $("mm-ppp");
+    if (!$("mm-enabled").checked) {
+      box.className = "callout";
+      box.textContent = "Desligada: a malha fica parada.";
+    } else {
+      const ppp = passosPorPeriodo(parseFloat($("mm-omega").value), dt);
+      box.className = "callout " + (ppp < 10 ? "warn" : "good");
+      box.innerHTML = `<b>${Number.isFinite(ppp) ? ppp.toFixed(1).replace(".", ",") : "–"}</b> passos de tempo por período de oscilação` +
+        (ppp < 4 ? " — abaixo de 4 a simulação é abortada (aliasing: a malha seria amostrada sempre na mesma fase)."
+          : ppp < 10 ? " — abaixo de 10: amostragem pobre da oscilação." : ".");
     }
   }
 
-  // -- lista de simulacoes lancadas ---------------------------------------
+  // -- rascunhos -----------------------------------------------------------
 
-  function jobCard(job) {
-    // denominador = quadros que a simulacao vai escrever (um a cada
-    // vtk_interval + o ultimo), nao o total de iteracoes -- senao a barra
-    // travaria em ~1/vtk_interval. `expected_frames` vem do backend; o
-    // fallback cobre jobs de antes dessa mudanca.
-    const alvoQuadros = job.expected_frames || job.iterations;
-    const pct = alvoQuadros ? Math.min(100, Math.round((100 * job.frames_done) / alvoQuadros)) : 0;
-    const card = el("div", { class: "job-card" }, [
-      el("div", { class: "job-head" }, [
-        el("span", { class: "job-title", text: job.label }),
-        el("span", { class: `status ${job.status}`, text: job.status }),
-      ]),
-      el("div", { class: "bar" }, [el("div", { class: "bar-fill", style: `width:${pct}%` })]),
-      el("div", { text: `${job.frames_done} / ${alvoQuadros} quadros` }),
-      el("pre", { text: job.log_tail || "" }),
-    ]);
-    if (job.status === "running") {
-      const cancelBtn = el("button", {
-        text: "Cancelar",
-        onclick: async () => { await api(`/api/simulations/${job.id}/cancel`, { method: "POST" }); refreshJobs(); },
-      });
-      card.appendChild(el("div", { class: "job-actions" }, [cancelBtn]));
+  function templateRef(item) {
+    return item ? { kind: item.kind, name: item.name, slug: item.slug } : null;
+  }
+
+  function findTemplate(ref) {
+    if (!ref) return null;
+    return templateItems.find((t) => t.kind === ref.kind && (ref.kind === "saved" ? t.slug === ref.slug : t.name === ref.name));
+  }
+
+  function saveDrafts() {
+    try {
+      localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts.map(({ key, templateName, loaded, baseline, cfg }) => (
+        { key, templateName, loaded, baseline, cfg }))));
+    } catch (e) { /* sem storage: os rascunhos valem so nesta aba */ }
+  }
+
+  function restoreDrafts() {
+    try {
+      const salvos = JSON.parse(localStorage.getItem(DRAFTS_KEY) || "[]");
+      if (Array.isArray(salvos)) drafts = salvos.filter((d) => d && d.key).map((d) => ({ ...d, error: null }));
+    } catch (e) {
+      drafts = [];
     }
-    return card;
+  }
+
+  // grava o formulario no rascunho ativo (chamado a cada edicao)
+  function formToDraft() {
+    const d = activeDraft();
+    updateDerived();
+    if (!d) return;
+    d.cfg = buildConfig();
+    d.templateName = $("tpl-name").value.trim();
+    d.error = null;
+    saveDrafts();
+    updateDirty();
+    renderCards();
+  }
+
+  function isDirty(d) {
+    return !!(d && d.loaded && d.baseline && JSON.stringify(d.cfg) !== d.baseline);
+  }
+
+  function updateDirty() {
+    $("tpl-dirty").classList.toggle("on", isDirty(activeDraft()));
+  }
+
+  function loadIntoForm(cfg, readonly) {
+    switchMeshIfKnown(cfg && cfg.mesh);
+    applyConfig(cfg || {});
+    $("form-fields").disabled = readonly;
+    $("tpl-name").disabled = readonly;
+    $("ro-note").hidden = !readonly;
+    updateDerived();
+  }
+
+  function newDraft(fromCfg, templateName, loaded) {
+    if (!meshes.length) return;
+    const d = { key: `d${Date.now().toString(36)}${draftSeq++}`, templateName: templateName || "", loaded: loaded || null,
+                baseline: null, cfg: null, error: null };
+    drafts.unshift(d);
+    activeKey = d.key;
+    openKeys.clear();
+    openKeys.add(d.key);
+    $("tpl-name").value = d.templateName;
+    if (fromCfg) {
+      loadIntoForm(fromCfg, false);
+      formToDraft();
+    } else {
+      // padrao: primeira malha + o template do projeto dela (se houver)
+      loadIntoForm({ mesh: meshes[0].name, simulation: { ...DEFAULT_SIM } }, false);
+      onMeshChange();
+      formToDraft();
+    }
+    renderCards();
+  }
+
+  function discardDraft(d) {
+    if (isDirty(d) && !window.confirm("Descartar este rascunho com alterações?")) return;
+    drafts = drafts.filter((x) => x !== d);
+    saveDrafts();
+    if (activeKey === d.key) {
+      const proximo = drafts[0] ? drafts[0].key : jobs[0] ? `j${jobs[0].id}` : null;
+      if (proximo) selectCard(proximo);
+      else newDraft();
+    }
+    renderCards();
+  }
+
+  function duplicateJob(job) {
+    const cfg = JSON.parse(JSON.stringify(job.config || {}));
+    delete cfg.output_dir;
+    const nome = jobTitleParts(job).base;
+    const tpl = templateItems.find((t) => t.name === nome);
+    newDraft(cfg, nome, templateRef(tpl));
+    showSection("malha");
+  }
+
+  // -- selecao de cartao -----------------------------------------------------
+
+  function selectCard(key) {
+    if (activeKey === key) {
+      if (openKeys.has(key)) openKeys.delete(key); else openKeys.add(key);
+      renderCards();
+      return;
+    }
+    activeKey = key;
+    openKeys.clear();
+    openKeys.add(key);
+    const d = draftByKey(key);
+    const j = jobByKey(key);
+    if (d) {
+      loadIntoForm(d.cfg || { mesh: meshes[0]?.name }, false);
+      $("tpl-name").value = d.templateName;
+      if (!d.cfg) formToDraft();
+    } else if (j) {
+      loadIntoForm(j.config || {}, true);
+      $("tpl-name").value = jobTitleParts(j).base;
+    }
+    $("tpl-menu").hidden = true;
+    updateDirty();
+    renderCards();
+  }
+
+  // -- template (menu ⋮) -----------------------------------------------------
+
+  const MENU_ICONS = {
+    load: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h6l2 2h8v10H4z"/></svg>',
+    revert: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 1 0 2.3-5.6M4 4v4h4"/></svg>',
+    save: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M5 4h11l3 3v13H5z"/><path d="M8 4v5h7V4M8 20v-6h8v6"/></svg>',
+    del: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13"/></svg>',
+  };
+
+  function showTplMsg(texto, erro) {
+    const p = $("tpl-msg");
+    p.textContent = texto;
+    p.classList.toggle("error", !!erro);
+    p.hidden = false;
+    clearTimeout(showTplMsg.timer);
+    showTplMsg.timer = setTimeout(() => { p.hidden = true; }, erro ? 8000 : 3500);
+  }
+
+  function openMenu(view) {
+    const menu = $("tpl-menu");
+    const d = activeDraft();
+    menu.innerHTML = "";
+    const item = (html, fn, disabled, cls) => {
+      const b = el("button", { type: "button", html });
+      if (disabled) b.disabled = true;
+      if (cls) b.className = cls;
+      b.addEventListener("click", (e) => { e.stopPropagation(); fn(); });
+      menu.appendChild(b);
+      return b;
+    };
+    if (view === "pick") {
+      item("← voltar", () => openMenu("main"), false, "back");
+      for (const kind of ["curated", "saved"]) {
+        const lista = templateItems.filter((t) => t.kind === kind);
+        if (!lista.length) continue;
+        menu.appendChild(el("div", { class: "group", text: kind === "curated" ? "templates do projeto" : "salvos por você" }));
+        // nome como textContent: vem do disco, nao e' HTML confiavel
+        for (const t of lista) item("", () => { loadTemplate(t); menu.hidden = true; }).textContent = t.name;
+      }
+    } else {
+      const nome = $("tpl-name").value.trim();
+      item(MENU_ICONS.load + "Carregar template…", () => openMenu("pick"), !d);
+      item(MENU_ICONS.revert + "Reverter alterações", () => { loadTemplate(findTemplate(d.loaded)); menu.hidden = true; },
+        !d || !isDirty(d) || !findTemplate(d.loaded));
+      menu.appendChild(el("hr"));
+      item(MENU_ICONS.save + "Salvar template", () => { menu.hidden = true; saveTemplate(); }, !d || !nome);
+      item(MENU_ICONS.del + "Excluir template", () => { menu.hidden = true; deleteTemplate(); },
+        !d || !d.loaded || d.loaded.kind !== "saved", "danger");
+    }
+    menu.hidden = false;
+  }
+
+  function loadTemplate(t) {
+    const d = activeDraft();
+    if (!d || !t) return;
+    switchMeshIfKnown(t.content.mesh);
+    applyConfig(t.content);
+    $("tpl-name").value = t.name;
+    d.loaded = templateRef(t);
+    formToDraft();
+    d.baseline = JSON.stringify(d.cfg);
+    saveDrafts();
+    updateDirty();
+  }
+
+  // mesma regra do slugify do servidor (jobs.slugify), pra saber se o nome
+  // vai sobrescrever um template salvo
+  function serverSlug(texto) {
+    return texto.trim().replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase() || "sim";
+  }
+
+  async function saveTemplate() {
+    const d = activeDraft();
+    const nome = $("tpl-name").value.trim();
+    if (!d || !nome) return;
+    formToDraft();
+    const existente = templateItems.find((t) => t.kind === "saved" && t.slug === serverSlug(nome));
+    const mesmo = existente && d.loaded && d.loaded.kind === "saved" && d.loaded.slug === existente.slug;
+    if (existente && !mesmo && !window.confirm(`Já existe o template salvo "${existente.name}". Sobrescrever?`)) return;
+    try {
+      const res = await api("/api/saved-configs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: nome, config: d.cfg }),
+      });
+      await loadTemplates();
+      d.loaded = { kind: "saved", name: nome, slug: res.slug };
+      d.baseline = JSON.stringify(d.cfg);
+      saveDrafts();
+      updateDirty();
+      showTplMsg(`Template "${nome}" salvo.`);
+    } catch (e) {
+      showTplMsg(e.message, true);
+    }
+  }
+
+  async function deleteTemplate() {
+    const d = activeDraft();
+    if (!d || !d.loaded || d.loaded.kind !== "saved") return;
+    if (!window.confirm(`Excluir o template salvo "${d.loaded.name}"?`)) return;
+    try {
+      await api(`/api/saved-configs/${d.loaded.slug}`, { method: "DELETE" });
+      showTplMsg(`Template "${d.loaded.name}" excluído.`);
+      d.loaded = null;
+      d.baseline = null;
+      await loadTemplates();
+      saveDrafts();
+      updateDirty();
+    } catch (e) {
+      showTplMsg(e.message, true);
+    }
+  }
+
+  async function loadTemplates() {
+    const [curated, saved] = await Promise.all([api("/api/configs"), api("/api/saved-configs")]);
+    templateItems = [
+      // "degrau.yaml" -> "degrau": o nome do template vira o prefixo do nome da simulacao
+      ...curated.map((t) => ({ kind: "curated", name: t.name.replace(/\.ya?ml$/i, ""), content: t.content })),
+      ...saved.map((s) => ({ kind: "saved", name: s.name, slug: s.slug, content: s.content })),
+    ];
+  }
+
+  // -- rodar / cancelar ------------------------------------------------------
+
+  async function runDraft(d) {
+    if (d.key === activeKey) formToDraft();
+    if (!d.cfg) return;
+    const mm = d.cfg.mesh_motion;
+    if (mm && mm.enabled && passosPorPeriodo(mm.omega, d.cfg.simulation.dt) < 4) {
+      d.error = "Malha móvel com menos de 4 passos de tempo por período (aliasing) — ajuste omega ou dt na seção Móvel.";
+      renderCards();
+      return;
+    }
+    const label = `${d.templateName || "sim"}_${stampOf(new Date())}`;
+    try {
+      const job = await api("/api/simulations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config: d.cfg, label }),
+      });
+      drafts = drafts.filter((x) => x !== d);
+      saveDrafts();
+      jobs = [job, ...jobs.filter((j) => j.id !== job.id)];
+      const eraAtivo = activeKey === d.key;
+      activeKey = null;
+      if (eraAtivo) selectCard(`j${job.id}`);
+      else renderCards();
+    } catch (e) {
+      d.error = e.message;
+      renderCards();
+    }
+  }
+
+  async function cancelJob(job) {
+    if (!window.confirm(`Cancelar a simulação "${job.label}"?`)) return;
+    try {
+      await api(`/api/simulations/${job.id}/cancel`, { method: "POST" });
+    } finally {
+      refreshJobs();
+    }
   }
 
   async function refreshJobs() {
-    const jobs = await api("/api/simulations");
-    const list = document.getElementById("jobs-list");
-    list.innerHTML = "";
-    if (!jobs.length) {
-      list.appendChild(el("p", { class: "hint", text: "Nenhuma simulação lançada ainda." }));
+    try {
+      jobs = await api("/api/simulations");
+    } catch (e) {
+      console.error("erro ao atualizar simulações:", e);
       return;
     }
-    for (const job of jobs) list.appendChild(jobCard(job));
+    renderCards();
   }
 
-  // -- inicializacao -------------------------------------------------------
+  // -- cartoes ---------------------------------------------------------------
+
+  function jobTitleParts(job) {
+    const m = STAMP_RE.exec(job.label || "");
+    if (m) return { base: m[1], stamp: m[2] };
+    // simulacoes de antes do padrao de nome: carimbo vem do inicio do job
+    return { base: job.label || "sim", stamp: stampOf(new Date(job.started_at * 1000)) };
+  }
+
+  function cardModel(key) {
+    const d = draftByKey(key);
+    if (d) {
+      const cfg = d.cfg || {};
+      const sim = cfg.simulation || {};
+      return {
+        key, draft: d, status: "draft", base: d.templateName || "sim", stamp: stampOf(new Date()), stampPending: true,
+        iteration: 0, total: sim.iterations, pct: 0, timeLabel: "Tempo estimado", time: null,
+        meshName: cfg.mesh, element: sim.element, reynolds: sim.reynolds, dt: sim.dt, error: d.error,
+      };
+    }
+    const j = jobByKey(key);
+    const cfg = j.config || {};
+    const sim = cfg.simulation || {};
+    const { base, stamp } = jobTitleParts(j);
+    const total = j.iterations;
+    const iteration = j.iteration ?? Math.min(total, j.frames_done * j.vtk_interval);
+    const timeLabel = { finished: "Tempo total", failed: "Tempo decorrido" }[j.status] || "Tempo estimado";
+    return {
+      key, job: j, status: j.status, base, stamp, stampPending: false,
+      iteration, total, pct: j.status === "finished" ? 100 : total ? Math.min(100, Math.round((100 * iteration) / total)) : 0,
+      timeLabel, time: j.status === "running" ? j.eta_s : j.elapsed_s,
+      meshName: baseName(cfg.mesh), element: sim.element, reynolds: sim.reynolds, dt: sim.dt, error: null,
+    };
+  }
+
+  const PLAY_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></svg>';
+  const STOP_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>';
+  const CHEV_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M9 5l7 7-7 7"/></svg>';
+
+  function stat(titulo) {
+    const v = el("div", { class: "v" });
+    const t = el("div", { class: "t", text: titulo });
+    return { node: el("div", { class: "stat" }, [t, v]), t, v };
+  }
+
+  function createCard(key) {
+    const r = {};
+    r.title = el("div", { class: "card-title" });
+    r.pct = el("span", { class: "mini-pct" });
+    r.badge = el("span", { class: "badge" });
+    r.play = el("button", { type: "button", class: "play" });
+    r.head = el("div", { class: "card-head" }, [el("span", { class: "chev", html: CHEV_ICON }), r.title, r.pct, r.badge, r.play]);
+    r.barCollapsedFill = el("div");
+    r.barCollapsed = el("div", { class: "bar bar-collapsed" }, [r.barCollapsedFill]);
+    r.barFill = el("div");
+    r.it = stat("Iterações");
+    r.time = stat("Tempo estimado");
+    r.ne = stat("Elementos");
+    r.nn = stat("Nós");
+    r.re = stat("Reynolds");
+    r.dt = stat("dt");
+    r.canvas = el("canvas", { height: "220" });
+    r.legend = el("div", { class: "mesh-legend" });
+    r.error = el("p", { class: "error" });
+    r.actions = el("div", { class: "card-actions" });
+    r.logPre = el("pre");
+    r.log = el("details", { class: "log" }, [el("summary", { text: "log" }), r.logPre]);
+    const expand = el("button", { type: "button", class: "icon-btn round expand", title: "Ampliar visualização da malha", text: "⤢" });
+    const body = el("div", { class: "card-body" }, [
+      el("div", { class: "bar" }, [r.barFill]),
+      el("div", { class: "stats" }, [
+        el("div", { class: "stat-group" }, [r.it.node, r.time.node]),
+        el("div", { class: "stat-group" }, [r.ne.node, r.nn.node]),
+        el("div", { class: "stat-group" }, [r.re.node, r.dt.node]),
+      ]),
+      el("div", { class: "preview" }, [r.canvas, expand]),
+      r.legend, r.error, r.actions, r.log,
+    ]);
+    const node = el("article", { class: "card glass", "data-key": key }, [r.head, r.barCollapsed, body]);
+    node._r = r;
+
+    r.head.addEventListener("click", (ev) => {
+      if (ev.target.closest(".play")) return;
+      selectCard(key);
+    });
+    r.play.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const m = cardModel(key);
+      if (m.draft) runDraft(m.draft);
+      else if (m.job && m.job.cancellable) cancelJob(m.job);
+    });
+    expand.addEventListener("click", () => {
+      const m = cardModel(key);
+      if (m.meshName) openMeshModal(m.meshName);
+    });
+    return node;
+  }
+
+  function setActions(r, m) {
+    const sig = `${m.status}|${m.job?.frames_done > 0}`;
+    if (r.actionsSig === sig) return;
+    r.actionsSig = sig;
+    r.actions.innerHTML = "";
+    const add = (texto, cls, fn) => r.actions.appendChild(el("button", { type: "button", class: `btn ${cls}`, text: texto, onclick: fn }));
+    const key = m.key;
+    if (m.draft) {
+      add("Descartar rascunho", "danger", () => { const d = draftByKey(key); if (d) discardDraft(d); });
+      return;
+    }
+    if (m.status === "finished" || m.job.frames_done > 0) {
+      add("Abrir em Resultados", m.status === "finished" ? "primary" : "", () => {
+        const j = jobByKey(key);
+        if (j) showScreen("resultados", { runId: j.results_id });
+      });
+    }
+    add("Duplicar", "", () => { const j = jobByKey(key); if (j) duplicateJob(j); });
+  }
+
+  function updateCard(node, m) {
+    const r = node._r;
+    const open = openKeys.has(m.key);
+    node.classList.toggle("open", open);
+    node.classList.toggle("selected", m.key === activeKey);
+
+    r.title.innerHTML = "";
+    r.title.append(
+      el("span", { class: "k", text: "Simulação: " }),
+      document.createTextNode(m.base),
+      el("span", {
+        class: `stamp${m.stampPending ? " pending" : ""}`, text: `_${m.stamp}`,
+        title: m.stampPending ? "prévia — data e hora definidas ao clicar em ▶" : "data e hora em que foi rodada",
+      }),
+    );
+    r.pct.textContent = !open && m.status === "running" ? `${m.pct}%` : "";
+    r.badge.className = `badge ${m.status}`;
+    r.badge.textContent = STATUS_TXT[m.status] || m.status;
+
+    const podeParar = m.status === "running" && m.job?.cancellable;
+    r.play.className = `play${podeParar ? " stop" : ""}`;
+    r.play.innerHTML = podeParar ? STOP_ICON : PLAY_ICON;
+    r.play.disabled = !(m.draft ? !!m.draft.cfg : podeParar);
+    r.play.title = m.draft ? "Rodar simulação" : podeParar ? "Cancelar simulação"
+      : m.status === "running" ? "Rodando (lançada antes de o servidor reiniciar — não dá para cancelar daqui)" : "Já executada";
+
+    r.barCollapsed.hidden = !!m.draft;
+    r.barCollapsedFill.style.width = `${m.pct}%`;
+    r.barFill.style.width = `${m.pct}%`;
+
+    const mesh = meshes.find((x) => x.name === m.meshName);
+    r.it.v.textContent = `${fmtNum(m.iteration)}/${fmtNum(m.total)}`;
+    r.time.t.textContent = m.timeLabel;
+    r.time.v.textContent = hms(m.time);
+    r.time.v.classList.toggle("dim", m.time == null);
+    r.ne.v.textContent = fmtNum(mesh?.nelements);
+    r.nn.v.textContent = fmtNum(nodeCount(mesh, m.element));
+    r.re.v.textContent = fmtNum(m.reynolds);
+    r.dt.v.textContent = fmtDt(m.dt);
+
+    r.error.textContent = m.error || "";
+    r.error.hidden = !m.error;
+    setActions(r, m);
+
+    r.log.hidden = !!m.draft;
+    if (m.job) {
+      if (r.logPre.textContent !== (m.job.log_tail || "")) r.logPre.textContent = m.job.log_tail || "";
+      if (m.status === "failed" && r.lastStatus !== "failed") r.log.open = true;
+    }
+    r.lastStatus = m.status;
+
+    if (open) drawCardPreview(r, m.meshName);
+  }
+
+  function drawCardPreview(r, meshName) {
+    const geo = meshName && meshGeometryCache.get(meshName);
+    if (!geo) {
+      if (meshName && meshes.some((x) => x.name === meshName)) {
+        loadMeshGeometry(meshName).then(renderCards).catch((e) => console.error(e));
+      }
+      return;
+    }
+    const w = Math.round(r.canvas.clientWidth);
+    if (!w || (r.drawn === meshName && r.drawnWidth === w)) return;
+    r.canvas.width = w;
+    r.canvas.height = 220;
+    renderMeshLegend(r.legend, renderMeshWireframe(r.canvas, geo));
+    r.drawn = meshName;
+    r.drawnWidth = w;
+  }
+
+  function renderCards() {
+    const container = $("cards");
+    const keys = [...drafts.map((d) => d.key), ...jobs.map((j) => `j${j.id}`)];
+    const existentes = new Map([...container.querySelectorAll(".card")].map((n) => [n.dataset.key, n]));
+    for (const [key, node] of existentes) if (!keys.includes(key)) node.remove();
+    container.querySelector(".cards-empty")?.remove();
+    keys.forEach((key, i) => {
+      const node = existentes.get(key) || createCard(key);
+      if (container.children[i] !== node) container.insertBefore(node, container.children[i] || null);
+      updateCard(node, cardModel(key));
+    });
+    if (!keys.length) container.appendChild(el("p", { class: "hint cards-empty", text: "Nenhuma simulação — clique em + para começar." }));
+  }
+
+  // -- modal da malha --------------------------------------------------------
+
+  function closeMeshModal() {
+    $("mesh-modal").hidden = true;
+  }
+
+  async function openMeshModal(meshName) {
+    const geo = await loadMeshGeometry(meshName);
+    $("mesh-modal").hidden = false;
+    $("mesh-modal-title").textContent = `// ${meshName}`;
+    renderMeshLegend($("mesh-modal-legend"), renderMeshWireframe($("mesh-modal-canvas"), geo));
+  }
+
+  // -- inicializacao -----------------------------------------------------------
 
   async function loadMeshes() {
     meshes = await api("/api/meshes");
-    const meshSel = document.getElementById("f-mesh");
+    const meshSel = $("f-mesh");
     meshSel.innerHTML = "";
-    for (const m of meshes) meshSel.appendChild(el("option", { value: m.name, text: `${m.name} (${m.npoints} pts)` }));
+    for (const m of meshes) meshSel.appendChild(el("option", { value: m.name, text: m.name }));
     meshSel.addEventListener("change", onMeshChange);
   }
 
-  async function loadAll() {
-    await Promise.all([loadMeshes(), loadTemplates()]);
-    onMeshChange();
+  function bindControls() {
+    for (const b of document.querySelectorAll(".rail-btn")) b.addEventListener("click", () => showSection(b.dataset.sec));
+    bindSegs();
+
+    const form = $("form-nova");
+    form.addEventListener("submit", (ev) => ev.preventDefault());
+    const onEdit = (ev) => {
+      if (ev.target.id === "f-mesh") return; // tratado em onMeshChange
+      if (ev.target.id === "f-solver-metodo") fillPrecond(ev.target.value, $("f-solver-precond").value);
+      if (ev.target.id === "f-solver-subsolver") syncChebPlaceholders();
+      formToDraft();
+    };
+    form.addEventListener("input", onEdit);
+    form.addEventListener("change", onEdit);
+    $("tpl-name").addEventListener("input", () => formToDraft());
+
+    $("tpl-menu-btn").addEventListener("click", (e) => {
+      e.stopPropagation();
+      if ($("tpl-menu").hidden) openMenu("main"); else $("tpl-menu").hidden = true;
+    });
+    document.addEventListener("click", (e) => {
+      // `isConnected`: o clique pode ter sido num item que o proprio menu
+      // acabou de trocar (ex. "Carregar template…" redesenha a lista)
+      if (e.target.isConnected && !$("tpl-menu").contains(e.target)) $("tpl-menu").hidden = true;
+    });
+
+    $("ro-dup").addEventListener("click", () => {
+      const j = jobByKey(activeKey);
+      if (j) duplicateJob(j);
+    });
+    $("btn-new-sim").addEventListener("click", () => {
+      newDraft();
+      showScreen("nova");
+      showSection("malha");
+    });
+
+    $("mesh-modal-close").addEventListener("click", closeMeshModal);
+    $("mesh-modal").addEventListener("click", (ev) => {
+      if (ev.target.id === "mesh-modal") closeMeshModal(); // clique no fundo, nao na caixa
+    });
+    document.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") { closeMeshModal(); $("tpl-menu").hidden = true; }
+    });
+    // o preview do cartao acompanha a largura da coluna
+    new ResizeObserver(() => renderCards()).observe($("cards"));
   }
 
-  function init() {
-    document.getElementById("form-nova").addEventListener("submit", onSubmit);
-    bindTemplateControls();
-    bindMeshPreviewControls();
-    loadAll();
-    refreshJobs();
-    jobsTimer = setInterval(refreshJobs, 2000);
+  async function init() {
+    bindControls();
+    await Promise.all([loadMeshes(), loadTemplates()]);
+    restoreDrafts();
+    await refreshJobs();
+    const primeiro = drafts[0];
+    if (primeiro) selectCard(primeiro.key);
+    else newDraft();
+    setInterval(refreshJobs, 2000);
   }
 
   return { init };
@@ -1947,10 +2534,12 @@ const Resultados = (() => {
   }
 
   let initialized = false;
-  async function onShow() {
+  // `runId`: abre direto essa simulacao (botao "Abrir em Resultados" do cartao)
+  async function onShow(runId) {
     if (!initialized) { bindControls(); bindLineControls(); bindViewportControls(); initialized = true; }
     await refreshRuns();
     const sel = document.getElementById("r-run");
+    if (runId && runs.some((r) => r.id === runId)) sel.value = runId;
     if (sel.value && sel.value !== loadedForRun) await loadRun(sel.value);
   }
 

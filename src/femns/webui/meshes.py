@@ -4,6 +4,7 @@ import glob
 import os
 
 import meshio
+import numpy as np
 
 from femns.io import blocos_do_tipo, conectividade
 from femns.mesh import DIMENSAO_DO_BLOCO, nome_por_tag
@@ -20,13 +21,26 @@ def list_meshes(root: str) -> list[dict]:
     for path in sorted(glob.glob(os.path.join(root, "*.msh"))):
         raw = meshio.read(path)
         boundary_names = [nome for nome in raw.field_data if _tem_celulas(raw, nome)]
+        triangulos = conectividade(raw.cells, "triangle")
         out.append({
             "name": os.path.basename(path),
             "path": path,
             "npoints": int(raw.points.shape[0]),
+            # elementos e arestas: o front calcula os nos de cada elemento
+            # (MINI = vertices + elementos; Tri6 = vertices + arestas)
+            "nelements": int(triangulos.shape[0]),
+            "nedges": contar_arestas(triangulos),
             "boundary_names": boundary_names,
         })
     return out
+
+
+def contar_arestas(triangulos: np.ndarray) -> int:
+    """Arestas distintas de uma triangulacao (cada aresta interna e' compartilhada por 2 triangulos)."""
+    if len(triangulos) == 0:
+        return 0
+    arestas = np.concatenate([triangulos[:, [0, 1]], triangulos[:, [1, 2]], triangulos[:, [2, 0]]])
+    return int(np.unique(np.sort(arestas, axis=1), axis=0).shape[0])
 
 
 def _tem_celulas(raw: meshio.Mesh, nome_grupo: str) -> bool:

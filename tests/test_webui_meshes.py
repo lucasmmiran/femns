@@ -1,4 +1,6 @@
-from femns.webui.meshes import list_meshes, mesh_geometry
+import numpy as np
+
+from femns.webui.meshes import contar_arestas, list_meshes, mesh_geometry
 
 
 def test_list_meshes_le_malhas_reais_do_projeto():
@@ -32,3 +34,15 @@ def test_mesh_geometry_malha_real():
         assert len(segmentos) > 0
         for i, j in segmentos:
             assert 0 <= i < npoints and 0 <= j < npoints
+
+
+def test_contar_arestas_dois_triangulos_com_aresta_compartilhada():
+    assert contar_arestas(np.array([[0, 1, 2], [1, 3, 2]])) == 5
+    assert contar_arestas(np.zeros((0, 3), dtype=int)) == 0
+
+
+def test_list_meshes_conta_elementos_e_arestas():
+    """Euler numa triangulacao simplesmente conexa: V - A + E = 1."""
+    malha = next(m for m in list_meshes("meshes") if m["name"] == "poiseuille.msh")
+    assert malha["nelements"] > 0
+    assert malha["npoints"] - malha["nedges"] + malha["nelements"] == 1

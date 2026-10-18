@@ -400,30 +400,33 @@ build step) em `src/femns/webui/static/`.
 
 Duas telas:
 
-- **Nova simulação**: escolhe a malha (lê os nomes de contorno reais do
-  `.msh`, físical groups do Gmsh, via `femns.webui.meshes`), preenche
-  `dt`/`iterations`/`reynolds`/`element`, o
-  intervalo de gravação de `.vtk` (campo "Gravar .vtk a cada" na área de
-  template, logo abaixo do rótulo — `simulation.vtk_interval`, padrão 10)
-  e `tol`/`max_iter` do BiCGSTAB (seção "Solver linear",
-  `simulation.solver`),
-  monta `boundary.priority`/`boundary.conditions` num editor (reordenar
-  prioridade, marcar `vx`/`vy`/`p` por contorno, e por componente escolher
-  entre número, função de `y` ou perfil parabólico no seletor ao lado) —
-  com um seletor de
-  template que pré-preenche tudo a partir de um `configs/*.yaml`
-  existente. "Salvar configuração" grava o formulário inteiro (nome
-  escolhido na hora) em `configs/gui_saved/` via `femns.webui.saved_configs`
-  (git-ignorado, local do usuário — distinto dos templates curados em
-  `configs/*.yaml`); o seletor "Configuração salva" ao lado recarrega
-  qualquer uma de volta no formulário (inclusive `mesh_motion`), com botão de excluir. Salvar não valida nada (dá pra
-  guardar um rascunho incompleto); só "Rodar simulação" valida de fato.
-  "Rodar simulação" grava um config novo em `configs/gui/` e lança
-  `scripts/run_simulation.py` como subprocesso
-  (`femns.webui.jobs`); a tela acompanha progresso (quadros
-  `solucao-N.vtk` escritos vs. os esperados, `⌈iterations/vtk_interval⌉`)
-  e log em tempo real, com botão de cancelar.
-  Saída em `solucoes/gui/<rótulo>-<timestamp>/` (git-ignorado, mesmo
+- **Simulação**: o botão **+** da barra superior cria um rascunho, que
+  aparece como cartão na coluna da direita; o formulário da esquerda
+  edita sempre o cartão ativo. O trilho vertical escolhe a seção:
+  **Malha** (`.msh`, com contagem de elementos/vértices/arestas via
+  `femns.webui.meshes`, e elemento MINI/Tri6), **Contorno**
+  (`boundary.priority`/`boundary.conditions`: reordenar prioridade, marcar
+  `vx`/`vy`/`p` por contorno e escolher número, função de `y` ou perfil
+  parabólico), **Parâmetros** (`dt`/`iterations`/`reynolds` e
+  `simulation.vtk_interval`, padrão 10), **Móvel** (`mesh_motion`, com os
+  passos de tempo por período da oscilação) e **Solver**
+  (`simulation.solver` inteiro: método, pré-condicionador, subsolver,
+  `tol`/`max_iter`, passos de Chebyshev, `beta_por_passo`,
+  `verificar_direto`). A área de template, acima das seções, tem o nome e
+  um menu ⋮ para carregar (templates curados de `configs/*.yaml` e salvos
+  de `configs/gui_saved/`), reverter alterações, salvar (grava o
+  formulário inteiro em `configs/gui_saved/` via
+  `femns.webui.saved_configs`, git-ignorado; não valida nada) e excluir
+  (só template salvo). Rascunhos ficam no `localStorage` do navegador.
+  O ▶ do cartão valida e lança: grava um config novo em `configs/gui/` e
+  roda `scripts/run_simulation.py` como subprocesso (`femns.webui.jobs`).
+  A simulação se chama `<template>_aaaammdd_hhmm` (data/hora do ▶). O
+  cartão mostra iterações e tempo estimado (lidos da barra do `tqdm` no
+  log), elementos/nós (MINI = vértices + elementos; Tri6 = vértices +
+  arestas), Reynolds, `dt`, a malha com os contornos e o log; ■ cancela.
+  Simulações de sessões anteriores do servidor são reconstruídas dos
+  arquivos (somente leitura, com "Duplicar" e "Abrir em Resultados").
+  Saída em `solucoes/gui/<timestamp>-<nome>-<id>/` (git-ignorado, mesmo
   tratamento do resto de `solucoes/`). O editor de condição de contorno
   cobre as três formas que `boundary.valores_da_condicao` aceita: número
   uniforme, função de `y` (ex. `4*y*(1-y)`) e perfil parabólico (o campo

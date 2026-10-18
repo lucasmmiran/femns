@@ -130,3 +130,71 @@ def test_validate_config_rejeita_moving_point(meshes_root):
     cfg["moving_point"]["enabled"] = False  # bloco desligado de config antigo: aceito (ignorado)
     validate_config(cfg, meshes_root)
 
+
+
+# -- progresso pelo log (tqdm) e historico de sessoes anteriores -------------
+
+from femns.webui.jobs import JobManager, progresso_do_log  # noqa: E402
+
+
+def test_progresso_do_log_usa_a_ultima_barra_do_tqdm():
+    texto = (" 10%|#  | 100/1000 [00:20<03:00,  5.00it/s]\r"
+             " 45%|#### | 450/1000 [1:01:23<01:40,  5.40it/s, bicg_iters=12, residual=9.8e-09]\r")
+    p = progresso_do_log(texto)
+    assert p == {"iteration": 450, "elapsed_s": 3683.0, "eta_s": 100.0, "finished": False}
+
+
+def test_progresso_do_log_sem_estimativa_e_sem_barra():
+    assert progresso_do_log("  0%|          | 0/1000 [00:00<?, ?it/s]")["eta_s"] is None
+    p = progresso_do_log("Leitura de malha completa:\n")
+    assert p["iteration"] is None and p["elapsed_s"] is None and not p["finished"]
+
+
+def test_progresso_do_log_tempo_final_marca_concluida():
+    texto = "100%|##| 8000/8000 [3:33:27<00:00,  1.60s/it]\nTempo final: 12810.57 segundos\n"
+    p = progresso_do_log(texto)
+    assert p["finished"] and p["iteration"] == 8000 and p["elapsed_s"] == 12810.57 and p["eta_s"] == 0.0
+
+
+def _job_antigo(repo, name, cfg, log, meta=None):
+    (repo / "configs" / "gui").mkdir(parents=True, exist_ok=True)
+    (repo / "solucoes" / "gui" / "_logs").mkdir(parents=True, exist_ok=True)
+    import yaml
+    (repo / "configs" / "gui" / f"{name}.yaml").write_text(yaml.safe_dump(cfg))
+    if log is not None:
+        (repo / "solucoes" / "gui" / "_logs" / f"{name}.log").write_text(log)
+    if meta is not None:
+        import json
+        (repo / "solucoes" / "gui" / "_logs" / f"{name}.json").write_text(json.dumps(meta))
+
+
+def test_jobmanager_reconstroi_jobs_de_sessao_anterior(tmp_path):
+    import os
+    import time
+    cfg = config_valido()
+    _job_antigo(tmp_path, "20260901-194818-degrau-re800-042c02", cfg,
+                "100%|##| 10/10 [00:05<00:00]\nTempo final: 5.1 segundos\n",
+                meta={"label": "degrau-re800_20260901_1948", "started_at": 123.0})
+    _job_antigo(tmp_path, "20260902-101500-lid-aaaaaa", cfg, " 30%|# | 3/10 [00:03<00:07]\r")
+    log_velho = tmp_path / "solucoes" / "gui" / "_logs" / "20260902-101500-lid-aaaaaa.log"
+    os.utime(log_velho, (time.time() - 3600, time.time() - 3600))  # sem atividade: morreu com o servidor
+    (tmp_path / "configs" / "gui" / "quebrado.yaml").write_text("simulation: [")  # yaml invalido: pulado
+
+    jobs = {j.label: j.status() for j in JobManager(str(tmp_path)).list()}
+
+    assert set(jobs) == {"degrau-re800_20260901_1948", "lid"}  # sem meta: rotulo sai do nome
+    concluido, interrompido = jobs["degrau-re800_20260901_1948"], jobs["lid"]
+    assert concluido["status"] == "finished" and concluido["started_at"] == 123.0
+    assert concluido["elapsed_s"] == 5.1 and concluido["iteration"] == 10
+    assert concluido["config"]["simulation"]["dt"] == 0.01
+    assert interrompido["status"] == "failed" and not interrompido["cancellable"]
+    assert interrompido["iteration"] == 3 and interrompido["eta_s"] is None
+
+
+def test_jobmanager_log_recente_sem_processo_conta_como_rodando(tmp_path):
+    _job_antigo(tmp_path, "20260902-101500-lid-bbbbbb", config_valido(), " 30%|# | 3/10 [00:03<00:07]\r")
+    (job,) = JobManager(str(tmp_path)).list()
+    st = job.status()
+    assert st["status"] == "running" and st["eta_s"] == 7.0
+    assert not st["cancellable"]  # processo de outra sessao do servidor: nao da pra cancelar daqui
+    assert not JobManager(str(tmp_path)).cancel(job.id)
