@@ -214,6 +214,8 @@ class Remontador:
         self.eh_cc[p_cc_pts.to(torch.int64) + 2 * nn] = True
         self._g_vel = torch.zeros(self.N, dtype=X.dtype, device=dev)  # vx, vy prescritos; pressao a parte (depende de beta)
         self._g_p = torch.zeros(self.N, dtype=X.dtype, device=dev)
+        self._vx_pts = vx_cc_pts.to(torch.int64)
+        self._vy_pts = vy_cc_pts.to(torch.int64)
         if valores_cc is not None:
             vx_cc, vy_cc, p_cc = valores_cc
             self._g_vel[vx_cc_pts] = vx_cc[vx_cc_pts]
@@ -305,6 +307,15 @@ class Remontador:
 
     def _rhs_cc(self, val, g) -> torch.Tensor:
         return torch.where(self.eh_cc, g, -self._pA.levantamento(val, g))
+
+    def definir_valores_cc(self, vx_cc: torch.Tensor, vy_cc: torch.Tensor) -> None:
+        """Troca os valores prescritos de velocidade (mesmos nos com Dirichlet).
+
+        Para paredes moveis, cuja velocidade muda a cada passo: vale a partir
+        da proxima `remontar` (o lado direito das CCs, `rhs_cc`, e' refeito la).
+        """
+        self._g_vel[self._vx_pts] = vx_cc[self._vx_pts]
+        self._g_vel[self._vy_pts + self.nnodes] = vy_cc[self._vy_pts]
 
     def remontar(self, X, Y, beta=None) -> Sistema:
         """Remonta na geometria `(X, Y)`. `beta=None` recalcula a equilibracao

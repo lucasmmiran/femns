@@ -9,10 +9,12 @@ def test_list_meshes_le_malhas_reais_do_projeto():
     """
     malhas = {m["name"]: m for m in list_meshes("meshes")}
 
-    assert set(malhas) == {"degrau.msh", "lid.msh", "poiseuille.msh"}
+    assert {"degrau.msh", "lid.msh", "poiseuille.msh", "valvula_10g.msh"} <= set(malhas)
     assert set(malhas["poiseuille.msh"]["boundary_names"]) == {"inlet", "outlet", "top", "bottom"}
     assert set(malhas["degrau.msh"]["boundary_names"]) == {"inlet", "outlet", "top", "bottom"}
     assert set(malhas["lid.msh"]["boundary_names"]) == {"left", "right", "top", "bottom", "outlet"}
+    assert set(malhas["valvula_10g.msh"]["boundary_names"]) == {
+        "inlet", "outlet", "upper", "bottom", "valve_up", "valve_down", "outter_wall", "inner_wall"}
     assert all(m["npoints"] > 0 for m in malhas.values())
 
 

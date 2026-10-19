@@ -11,6 +11,7 @@ import torch
 import yaml
 from tqdm import tqdm
 
+import femns.valvula_rotacao as valvula_rotacao
 from femns.boundary import assign_boundary_names, build_boundary_conditions
 from femns.elemento import elemento_por_nome
 from femns.io import caminho_frame, write_vtk
@@ -20,6 +21,7 @@ from femns.mesh import (
     montar_NToN,
     read_mesh,
 )
+from femns.movimento_malha import MovimentoValvula, opcoes_movimento
 from femns.moving_mesh import aplicar_oscilacao, passos_por_periodo, preparar_oscilacao
 from femns.precondicionadores import DE_BLOCO, PassosChebyshev
 from femns.precondicionadores import montar as montar_precondicionador
@@ -108,6 +110,70 @@ def main():
     localizador = Localizador(IEN_np, nnodes)
 
     IEN, X, Y = torch.from_numpy(IEN_np).to(device), torch.from_numpy(X_np).to(device), torch.from_numpy(Y_np).to(device)
+
+    # Valvula esfera fechando por rotacao (femns.valvula_rotacao +
+    # femns.movimento_malha, plano 12/10 `plano_movimento_malha_1210.md`): a
+    # esfera gira rigida, os arcos esticam, o tubo fica parado e o interior
+    # segue a soma ponderada de deslocamentos. IEN fixa; o sistema e'
+    # remontado a cada passo. Os grupos de `velocidade_malha` recebem, como
+    # Dirichlet do fluido, a velocidade dos nos da malha, (x^{n+1} - x^n)/dt.
+    vr_cfg = cfg.get("valvula_rotacao") or {}
+    vr_enabled = vr_cfg.get("enabled", False)
+    movimento = None
+    if vr_enabled:
+        if cfg.get("mesh_motion", {}).get("enabled", False):
+            raise ValueError("valvula_rotacao e mesh_motion movem a malha de formas incompativeis; use um so.")
+        vr_th0 = np.radians(vr_cfg["theta0"])
+        vr_th_ini = np.radians(vr_cfg.get("theta_inicio", vr_cfg["theta0"]))
+        vr_th_fim = np.radians(vr_cfg["theta_fim"])
+        vr_dur = float(vr_cfg.get("duracao", Iter * dt))
+        vr_atraso = float(vr_cfg.get("atraso", 0.0))
+        vr_vel_malha = list(vr_cfg.get("velocidade_malha", []))
+        opcoes_mov = opcoes_movimento(vr_cfg.get("movimento"))
+        contorno_v = valvula_rotacao.preparar(
+            mesh.IEN, mesh.X, mesh.Y, mesh.IENbound, mesh.IENboundElem,
+            H=vr_cfg.get("H", 0.5), L=vr_cfg.get("L", 2.0), theta0=vr_th0,
+            grupos_corda=vr_cfg.get("grupos_corda", ["valve_up", "valve_down"]),
+            grupos_arco=vr_cfg.get("grupos_arco", ["outter_wall", "inner_wall"]))
+        geo_v = contorno_v.geo
+        if max(vr_th_ini, vr_th_fim) >= geo_v.theta_fechamento:
+            raise ValueError(
+                f"valvula_rotacao: theta ate {np.degrees(max(vr_th_ini, vr_th_fim)):.2f} graus, mas a valvula "
+                f"fecha em 2*asen(H/r) = {np.degrees(geo_v.theta_fechamento):.2f} graus.")
+        desconhecidos = set(vr_vel_malha) - set(mesh.IENboundElem)
+        if desconhecidos:
+            raise ValueError(f"valvula_rotacao.velocidade_malha: grupos {sorted(desconhecidos)} nao existem na malha")
+        # nos de velocidade (extras inclusive) com a Dirichlet = velocidade da malha;
+        # quem fica nas quinas entre grupos e' decidido por boundary.priority
+        idx_vm = np.array([i for i in range(nnodes) if ccName[i] in vr_vel_malha], dtype=int)
+        faltando = ~has_vx_bc[idx_vm] | ~has_vy_bc[idx_vm]
+        if faltando.any():
+            raise ValueError(
+                f"valvula_rotacao: {int(faltando.sum())} no(s) de {vr_vel_malha} sem Dirichlet em vx/vy -- "
+                f"de' a esses grupos `{{vx: 0.0, vy: 0.0}}` em boundary.conditions (o valor e' "
+                f"substituido a cada passo pela velocidade da malha).")
+        idx_vm_t = torch.from_numpy(idx_vm).to(device)
+        movimento = MovimentoValvula(contorno_v, mesh.IEN, mesh.X, mesh.Y, opcoes_mov)
+
+        om_max = abs(vr_th_fim - vr_th_ini) * 0.5 * np.pi / vr_dur
+        h_mov = movimento.h0[contorno_v.idx_movel].min()
+        print(f"Valvula (rotacao): theta {np.degrees(vr_th_ini):.2f} -> {np.degrees(vr_th_fim):.2f} graus "
+              f"em {vr_dur} s apos {vr_atraso} s (rampa em cosseno; malha gerada em {vr_cfg['theta0']} graus; "
+              f"fecha em {np.degrees(geo_v.theta_fechamento):.2f})")
+        print(f"  r = {geo_v.r:.6f} | velocidade maxima da ponta da corda = {om_max * geo_v.r:.4f} "
+              f"| r*dtheta max por passo = {om_max * geo_v.r * dt:.2e} ({om_max * geo_v.r * dt / h_mov:.2e} h_min)")
+        print(f"  {len(contorno_v.idx_rigido)} vertices rigidos (corda + filetes da esfera), "
+              f"{len(contorno_v.idx_arco)} deslizando em {len(contorno_v.arcos)} arcos")
+        print(f"  Dirichlet = velocidade da malha em: {vr_vel_malha or 'nenhum grupo'} ({len(idx_vm)} nos)")
+        print(f"  movimento do interior: {opcoes_mov.descricao}")
+        if abs(vr_th_ini - vr_th0) > 1e-12:
+            info_pre = movimento.passo(vr_th_ini)
+            if info_pre["invertidos"]:
+                raise RuntimeError(f"a malha inverte ao levar a valvula de theta0 a theta_inicio ({info_pre})")
+            print(f"  malha levada de theta0 a theta_inicio (q_min = {info_pre['q_min']:.3f})")
+            X[:npoints] = torch.from_numpy(movimento.X).to(device)
+            Y[:npoints] = torch.from_numpy(movimento.Y).to(device)
+            X, Y = atualiza_nos_extras(IEN, X, Y)
 
     print(f"Tempo ate o assembly: {round(timer() - start, 2)}")
 
@@ -227,9 +293,51 @@ def main():
 
     sincronizar = torch.cuda.synchronize if device.type == "cuda" else (lambda: None)
 
+    vm_nao_nula = False  # a velocidade da malha imposta na parede no passo anterior era != 0
+    info_mov = None
     pbar = tqdm(range(Iter))
     for n in pbar:
         t_passo = timer()
+        if vr_enabled:
+            # Leva a valvula ao angulo do fim deste passo, impoe na parede a
+            # velocidade da malha e remonta o sistema na geometria nova.
+            th_novo = valvula_rotacao.theta_em((n + 1) * dt, vr_th_ini, vr_th_fim, vr_dur, vr_atraso)
+            moveu = th_novo != movimento.theta
+            if moveu or vm_nao_nula:
+                Xv, Yv = movimento.X.copy(), movimento.Y.copy()
+                if moveu:
+                    info_mov = movimento.passo(th_novo)
+                    if info_mov["invertidos"] > 0:
+                        raise RuntimeError(
+                            f"a malha da valvula inverteu {info_mov['invertidos']} elemento(s) na iteracao {n} "
+                            f"(theta = {info_mov['theta_deg']:.3f} graus, q_min = {info_mov['q_min']:.3f}). "
+                            f"Com IEN fixa nao ha retriangulacao.")
+                    X[:npoints] = torch.from_numpy(movimento.X).to(device)
+                    Y[:npoints] = torch.from_numpy(movimento.Y).to(device)
+                    X, Y = atualiza_nos_extras(IEN, X, Y)
+
+                # velocidade da malha por diferenca finita, nos extras pela media
+                # dos vertices da aresta (a mesma regra com que eles se movem)
+                wx = np.zeros(nnodes)
+                wy = np.zeros(nnodes)
+                wx[:npoints] = (movimento.X - Xv) / dt
+                wy[:npoints] = (movimento.Y - Yv) / dt
+                atualiza_nos_extras(IEN_np, wx, wy)
+                vx_cc[idx_vm_t] = torch.from_numpy(wx[idx_vm]).to(device)
+                vy_cc[idx_vm_t] = torch.from_numpy(wy[idx_vm]).to(device)
+                bc_dirichlet[0][idx_vm] = wx[idx_vm]
+                bc_dirichlet[2][idx_vm] = wy[idx_vm]
+                remontador.definir_valores_cc(vx_cc, vy_cc)
+                vm_nao_nula = bool(np.any(wx[idx_vm]) or np.any(wy[idx_vm]))
+
+                beta_anterior = beta
+                sistema = remontador.remontar(X, Y, beta=(None if beta_por_passo else beta))
+                beta = sistema.beta
+                precond = montar_precondicionador(opcoes.precondicionador, sistema, dt, Re, passos_cheb,
+                                                  opcoes.subsolver)
+                if beta_por_passo and beta != beta_anterior:
+                    x0[2 * nnodes:] *= beta_anterior / beta
+
         if mm_enabled:
             # Move a malha para o instante deste passo e remonta o sistema na
             # geometria nova -- sem isso as matrizes ficariam as da malha
@@ -276,11 +384,16 @@ def main():
         )
         sincronizar()
         tempo_passo = timer() - t_passo - info.get("tempo_direto", 0.0)  # sem a checagem de validacao
-        pbar.set_postfix(iters=info["iters"], residual=f'{info["residual_verdadeiro"]:.1e}')
+        if vr_enabled:
+            pbar.set_postfix(iters=info["iters"], residual=f'{info["residual_verdadeiro"]:.1e}',
+                             theta=f'{np.degrees(movimento.theta):.3f}',
+                             q_min=f'{info_mov["q_min"]:.3f}' if info_mov else "-")
+        else:
+            pbar.set_postfix(iters=info["iters"], residual=f'{info["residual_verdadeiro"]:.1e}')
 
         # O campo recem-resolvido vive na geometria deste passo: ela vira a
         # referencia de interpolacao do proximo (ver X_campo acima).
-        if mm_enabled:
+        if mm_enabled or vr_enabled:
             X_campo, Y_campo = X.clone(), Y.clone()
 
         vx_sol = vx[:npoints]
@@ -304,6 +417,15 @@ def main():
         # do intervalo (e para `femns.io.ultimo_frame` / o visualizador
         # web continuarem achando o campo final).
         if (n + 1) % vtk_interval == 0 or (n + 1) == Iter:
+            if vr_enabled and info_mov is not None:
+                # historico da malha da valvula, uma linha por frame gravado
+                caminho_mov = os.path.join(output_dir, "movimento_malha.csv")
+                novo = not os.path.exists(caminho_mov) or n + 1 == vtk_interval
+                with open(caminho_mov, "w" if novo else "a") as f:
+                    if novo:
+                        f.write("iteracao,theta_graus,q_min,q_med,area_min,recusados\n")
+                    f.write(f"{n + 1},{np.degrees(movimento.theta):.6f},{info_mov['q_min']:.6f},"
+                            f"{info_mov['q_med']:.6f},{info_mov['area_min']:.6e},{info_mov['recusados']}\n")
             updated_points[:, 0] = X[:npoints].cpu().numpy()
             updated_points[:, 1] = Y[:npoints].cpu().numpy()
 

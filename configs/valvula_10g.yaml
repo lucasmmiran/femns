@@ -1,0 +1,47 @@
+# Valvula esfera fechando por rotacao, malha meshes/valvula_10g.msh (gerada
+# com a valvula em theta0 = 10 graus; fonte em meshes/valvula_10g.geo).
+# Contorno em femns.valvula_rotacao, interior em femns.movimento_malha
+# (soma ponderada de deslocamentos, docs/planos/plano_movimento_malha_1210.md).
+# theta e' medido a partir da valvula TOTALMENTE ABERTA (anti-horario); com
+# H = 0.5 e L = 2.0 ela fecha em 2*asen(H/r) = 53.13 graus.
+mesh: meshes/valvula_10g.msh
+output_dir: solucoes/valvula_10g
+
+simulation:
+  dt: 0.001
+  iterations: 8000
+  reynolds: 100
+  element: tri6
+  vtk_interval: 20
+  solver:
+    beta_por_passo: true   # a equilibracao de pressao acompanha a malha
+
+boundary:
+  # a ultima vence: as quinas da corda ficam com a velocidade da corda
+  priority: [outlet, inlet, upper, bottom, inner_wall, outter_wall, valve_up, valve_down]
+  conditions:
+    inlet: {vx: {perfil: parabolico, vmax: 1.5}, vy: 0.0}
+    upper: {vx: 0.0, vy: 0.0}
+    bottom: {vx: 0.0, vy: 0.0}
+    inner_wall: {vx: 0.0, vy: 0.0}
+    outter_wall: {vx: 0.0, vy: 0.0}
+    # valor substituido a cada passo pela velocidade da malha (velocidade_malha abaixo)
+    valve_up: {vx: 0.0, vy: 0.0}
+    valve_down: {vx: 0.0, vy: 0.0}
+    # outlet: sem condicao (saida livre, condicao natural)
+
+valvula_rotacao:
+  enabled: true
+  H: 0.5              # semialtura do tubo
+  L: 2.0              # corda do furo -> r = sqrt(H^2 + L^2/4) = 1.118034
+  theta0: 10.0        # graus: angulo em que a malha foi gerada
+  theta_inicio: 10.0
+  theta_fim: 20.0
+  atraso: 0.0         # s parado antes de comecar
+  duracao: 8.0        # s da rampa em cosseno; fixa a velocidade da parede
+  grupos_corda: [valve_up, valve_down]
+  grupos_arco: [outter_wall, inner_wall]
+  # grupos cuja Dirichlet do fluido e' a velocidade dos nos da malha
+  velocidade_malha: [valve_up, valve_down]
+  movimento:          # femns.movimento_malha.opcoes_movimento; omitido = so extensao harmonica (chi = 2)
+    extensao: {a3: 1.0, chi: 2.0}   # E0: a melhor no benchmark de geometria (plano §10)

@@ -182,6 +182,23 @@ def test_condicoes_de_contorno_simetricas(element):
     assert torch.allclose(x, x_full, atol=1e-9)
 
 
+@pytest.mark.parametrize("element", ["mini", "tri6"])
+def test_definir_valores_cc_equivale_a_remontador_novo(element):
+    """Parede movel: trocar a velocidade prescrita e remontar da' o mesmo sistema
+    (A e rhs_cc) que um Remontador criado do zero com os valores novos."""
+    c = _monta_caso(element)
+    vx0, vy0, p0 = _valores_cc(c)
+    R = Remontador(c["dt"], c["Re"], c["X"], c["Y"], c["IEN"], c["element"], c["npoints"],
+                   c["n_extra"], c["vxp"], c["vyp"], c["pp"], beta=1.3, valores_cc=(vx0, vy0, p0))
+    vx1, vy1 = 0.7 * vx0 - 0.2 * c["X"][: c["nnodes"]], vy0 + c["Y"][: c["nnodes"]]
+    R.definir_valores_cc(vx1, vy1)
+    sis = R.remontar(c["X"], c["Y"], beta=1.3)
+    R2 = Remontador(c["dt"], c["Re"], c["X"], c["Y"], c["IEN"], c["element"], c["npoints"],
+                    c["n_extra"], c["vxp"], c["vyp"], c["pp"], beta=1.3, valores_cc=(vx1, vy1, p0))
+    assert torch.allclose(sis.rhs_cc, R2.sistema_inicial.rhs_cc, atol=1e-13)
+    assert not torch.allclose(sis.rhs_cc, R.sistema_inicial.rhs_cc)
+
+
 def test_blocos_dos_precondicionadores():
     """Com `precisa_blocos=True`: Fx/Fy sao o bloco de velocidade de A com as
     CCs do componente eliminadas; Mp/Lp sao SPD com as CCs de pressao
