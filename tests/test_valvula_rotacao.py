@@ -100,6 +100,21 @@ def test_malha_antiga_de_quinas_vivas():
     assert len(c.idx_arco) == 60
 
 
+def test_velocidade_da_esfera(malha):
+    c = _contorno(malha)
+    om = 0.7
+    ux, uy = vr.velocidade_esfera(c, malha.X, malha.Y, om)
+    m = vr.mascara_esfera(c)
+    np.testing.assert_allclose(ux[m], -om * malha.Y[m])
+    np.testing.assert_allclose(uy[m], om * malha.X[m])
+    assert not ux[~m].any() and not uy[~m].any()
+    # filetes da carcaca (fora do circulo) ficam parados; arcos inteiros sao da esfera
+    parede = np.unique(malha.IENbound[np.isin(np.asarray(malha.IENboundElem), ["outter_wall"])])
+    fora = parede[np.hypot(malha.X[parede], malha.Y[parede]) > c.geo.r + 1e-6]
+    assert len(fora) > 0 and not m[fora].any()
+    assert m[c.idx_arco].all() and m[c.idx_rigido].all()
+
+
 def test_lei_temporal():
     a, b, T, d = 0.1, 0.3, 4.0, 1.0
     assert vr.theta_em(0.5, a, b, T, d) == a

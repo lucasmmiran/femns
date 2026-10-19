@@ -129,6 +129,12 @@ def main():
         vr_dur = float(vr_cfg.get("duracao", Iter * dt))
         vr_atraso = float(vr_cfg.get("atraso", 0.0))
         vr_vel_malha = list(vr_cfg.get("velocidade_malha", []))
+        # grupos cuja Dirichlet e' a velocidade do ponto material da esfera,
+        # omega x p (zero nos vertices que nao sao da esfera, ex. filetes da carcaca)
+        vr_vel_esfera = list(vr_cfg.get("velocidade_esfera", []))
+        if set(vr_vel_malha) & set(vr_vel_esfera):
+            raise ValueError(f"valvula_rotacao: grupos {sorted(set(vr_vel_malha) & set(vr_vel_esfera))} em "
+                             f"velocidade_malha e velocidade_esfera ao mesmo tempo")
         opcoes_mov = opcoes_movimento(vr_cfg.get("movimento"))
         contorno_v = valvula_rotacao.preparar(
             mesh.IEN, mesh.X, mesh.Y, mesh.IENbound, mesh.IENboundElem,
@@ -140,19 +146,23 @@ def main():
             raise ValueError(
                 f"valvula_rotacao: theta ate {np.degrees(max(vr_th_ini, vr_th_fim)):.2f} graus, mas a valvula "
                 f"fecha em 2*asen(H/r) = {np.degrees(geo_v.theta_fechamento):.2f} graus.")
-        desconhecidos = set(vr_vel_malha) - set(mesh.IENboundElem)
+        desconhecidos = set(vr_vel_malha + vr_vel_esfera) - set(mesh.IENboundElem)
         if desconhecidos:
-            raise ValueError(f"valvula_rotacao.velocidade_malha: grupos {sorted(desconhecidos)} nao existem na malha")
-        # nos de velocidade (extras inclusive) com a Dirichlet = velocidade da malha;
-        # quem fica nas quinas entre grupos e' decidido por boundary.priority
+            raise ValueError(f"valvula_rotacao.velocidade_malha/velocidade_esfera: grupos {sorted(desconhecidos)} "
+                             f"nao existem na malha")
+        # nos de velocidade (extras inclusive) com a Dirichlet = velocidade da malha
+        # (idx_vm) ou da esfera (idx_ve); quem fica nas quinas entre grupos e'
+        # decidido por boundary.priority
         idx_vm = np.array([i for i in range(nnodes) if ccName[i] in vr_vel_malha], dtype=int)
-        faltando = ~has_vx_bc[idx_vm] | ~has_vy_bc[idx_vm]
+        idx_ve = np.array([i for i in range(nnodes) if ccName[i] in vr_vel_esfera], dtype=int)
+        idx_mov = np.concatenate([idx_vm, idx_ve])
+        faltando = ~has_vx_bc[idx_mov] | ~has_vy_bc[idx_mov]
         if faltando.any():
             raise ValueError(
-                f"valvula_rotacao: {int(faltando.sum())} no(s) de {vr_vel_malha} sem Dirichlet em vx/vy -- "
-                f"de' a esses grupos `{{vx: 0.0, vy: 0.0}}` em boundary.conditions (o valor e' "
-                f"substituido a cada passo pela velocidade da malha).")
-        idx_vm_t = torch.from_numpy(idx_vm).to(device)
+                f"valvula_rotacao: {int(faltando.sum())} no(s) de {vr_vel_malha + vr_vel_esfera} sem Dirichlet "
+                f"em vx/vy -- de' a esses grupos `{{vx: 0.0, vy: 0.0}}` em boundary.conditions (o valor e' "
+                f"substituido a cada passo pela velocidade da malha ou da esfera).")
+        idx_mov_t = torch.from_numpy(idx_mov).to(device)
         movimento = MovimentoValvula(contorno_v, mesh.IEN, mesh.X, mesh.Y, opcoes_mov)
 
         om_max = abs(vr_th_fim - vr_th_ini) * 0.5 * np.pi / vr_dur
@@ -165,6 +175,8 @@ def main():
         print(f"  {len(contorno_v.idx_rigido)} vertices rigidos (corda + filetes da esfera), "
               f"{len(contorno_v.idx_arco)} deslizando em {len(contorno_v.arcos)} arcos")
         print(f"  Dirichlet = velocidade da malha em: {vr_vel_malha or 'nenhum grupo'} ({len(idx_vm)} nos)")
+        if vr_vel_esfera:
+            print(f"  Dirichlet = velocidade da esfera (omega x p) em: {vr_vel_esfera} ({len(idx_ve)} nos)")
         print(f"  movimento do interior: {opcoes_mov.descricao}")
         if abs(vr_th_ini - vr_th0) > 1e-12:
             info_pre = movimento.passo(vr_th_ini)
@@ -304,7 +316,7 @@ def main():
             th_novo = valvula_rotacao.theta_em((n + 1) * dt, vr_th_ini, vr_th_fim, vr_dur, vr_atraso)
             moveu = th_novo != movimento.theta
             if moveu or vm_nao_nula:
-                Xv, Yv = movimento.X.copy(), movimento.Y.copy()
+                Xv, Yv, th_antigo = movimento.X.copy(), movimento.Y.copy(), movimento.theta
                 if moveu:
                     info_mov = movimento.passo(th_novo)
                     if info_mov["invertidos"] > 0:
@@ -323,12 +335,19 @@ def main():
                 wx[:npoints] = (movimento.X - Xv) / dt
                 wy[:npoints] = (movimento.Y - Yv) / dt
                 atualiza_nos_extras(IEN_np, wx, wy)
-                vx_cc[idx_vm_t] = torch.from_numpy(wx[idx_vm]).to(device)
-                vy_cc[idx_vm_t] = torch.from_numpy(wy[idx_vm]).to(device)
-                bc_dirichlet[0][idx_vm] = wx[idx_vm]
-                bc_dirichlet[2][idx_vm] = wy[idx_vm]
+                # velocidade da esfera: omega x p na posicao nova, com o omega do
+                # passo (dtheta/dt, o mesmo da diferenca finita da corda)
+                ux, uy = np.zeros(nnodes), np.zeros(nnodes)
+                ux[:npoints], uy[:npoints] = valvula_rotacao.velocidade_esfera(
+                    contorno_v, movimento.X, movimento.Y, (movimento.theta - th_antigo) / dt)
+                atualiza_nos_extras(IEN_np, ux, uy)
+                wx[idx_ve], wy[idx_ve] = ux[idx_ve], uy[idx_ve]
+                vx_cc[idx_mov_t] = torch.from_numpy(wx[idx_mov]).to(device)
+                vy_cc[idx_mov_t] = torch.from_numpy(wy[idx_mov]).to(device)
+                bc_dirichlet[0][idx_mov] = wx[idx_mov]
+                bc_dirichlet[2][idx_mov] = wy[idx_mov]
                 remontador.definir_valores_cc(vx_cc, vy_cc)
-                vm_nao_nula = bool(np.any(wx[idx_vm]) or np.any(wy[idx_vm]))
+                vm_nao_nula = bool(np.any(wx[idx_mov]) or np.any(wy[idx_mov]))
 
                 beta_anterior = beta
                 sistema = remontador.remontar(X, Y, beta=(None if beta_por_passo else beta))

@@ -290,6 +290,27 @@ def suavizar_arcos(c: ContornoValvula, X, Y, a2: float, varreduras: int, pesos: 
         Y[a.nos[1:-1]] = c.geo.r * np.sin(phi[1:-1])
 
 
+def mascara_esfera(c: ContornoValvula) -> np.ndarray:
+    """Vertices que sao pontos da superficie da esfera: os rigidos e todos os
+    vertices de arco (pontas inclusive -- a ponta fixa e' o ponto de contato com
+    a carcaca, sobre o circulo). Filetes da carcaca (`|p| > r`) ficam de fora."""
+    m = np.zeros(len(c.X0), bool)
+    m[c.idx_rigido] = True
+    for a in c.arcos:
+        m[a.nos] = True
+    return m
+
+
+def velocidade_esfera(c: ContornoValvula, X, Y, omega: float):
+    """`omega x p = omega*(-y, x)` nos vertices da esfera (`mascara_esfera`), zero no resto.
+
+    E' a velocidade do ponto material da esfera que esta em `p` -- diferente da
+    velocidade do no da malha nos arcos, onde o no desliza (`eta*omega x p`).
+    """
+    m = mascara_esfera(c)
+    return np.where(m, -omega * np.asarray(Y), 0.0), np.where(m, omega * np.asarray(X), 0.0)
+
+
 # =============================================================================
 # 4. Lei temporal
 # =============================================================================

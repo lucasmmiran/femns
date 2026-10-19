@@ -207,6 +207,7 @@ benchmark_xlsx: solucoes/benchmarks.xlsx
     theta_fim: 20.0
     duracao: 8.0      # s da rampa em cosseno (padrão: a simulação inteira)
     velocidade_malha: [valve_up, valve_down]   # Dirichlet do fluido = velocidade do nó da malha
+    velocidade_esfera: [outter_wall]           # Dirichlet = ω×p nos pontos da esfera (0 nos filetes da carcaça)
     movimento:
       rotacao: {tipo: radial, rho1: 0.5, rho2: 1.0}   # radial | idw | nenhuma (psi em unidades de r)
       suavizacao: {pesos: valor_medio, a2: 0.5, varreduras: 3, a2_arco: 0.0, pesos_arco: referencia, q_guarda: 0.5}
@@ -219,7 +220,9 @@ benchmark_xlsx: solucoes/benchmarks.xlsx
   benchmark de geometria em `valvula_10g.msh`: sem a extensão, a
   suavização sozinha inverte a malha antes dos 15° (ver o plano, §10). Os grupos de `velocidade_malha` precisam de
   `{vx: 0.0, vy: 0.0}` em `boundary.conditions` (o valor é trocado a cada
-  passo por `(x^{n+1} − x^n)/dt`). Incompatível com `mesh_motion`. A
+  passo por `(x^{n+1} − x^n)/dt`). Nos arcos o nó da malha desliza
+  (anda `η·ω×p`), então a velocidade física da superfície da esfera é a de
+  `velocidade_esfera`, `ω×p` com `ω = Δθ/dt` do passo. Incompatível com `mesh_motion`. A
   qualidade da malha por frame vai para `<output_dir>/movimento_malha.csv`;
   `scripts/benchmark_movimento_malha.py` compara as configurações só na
   geometria, sem resolver o escoamento.
