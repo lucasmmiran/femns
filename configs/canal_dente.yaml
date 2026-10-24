@@ -1,0 +1,36 @@
+# Canal 7 x 1 com um dente na parede de baixo crescendo para dentro do
+# escoamento (malha meshes/canal_dente.msh, gerada com o dente de 0,1 x 0,2
+# centrado em x = 0; fonte em meshes/canal_dente.geo). O dente sobe como um
+# pistao rigido saindo do piso: altura 0,2 -> 0,6 numa rampa em cosseno.
+# Movimento em femns.dente_crescendo.
+mesh: meshes/canal_dente.msh
+output_dir: solucoes/canal_dente
+
+simulation:
+  dt: 0.001
+  iterations: 8000
+  reynolds: 100
+  element: tri6
+  vtk_interval: 20
+  solver:
+    beta_por_passo: true   # a equilibracao de pressao acompanha a malha
+
+boundary:
+  # a ultima vence: as quinas do dente com o piso ficam paradas (bottom)
+  priority: [outlet, inlet, top, dente, bottom]
+  conditions:
+    inlet: {vx: {perfil: parabolico, vmax: 1.5}, vy: 0.0}
+    top: {vx: 0.0, vy: 0.0}
+    bottom: {vx: 0.0, vy: 0.0}
+    # valor substituido a cada passo pela velocidade do pistao, (0, dh/dt)
+    dente: {vx: 0.0, vy: 0.0}
+    # outlet: sem condicao (saida livre, condicao natural)
+
+dente_crescendo:
+  enabled: true
+  grupo: dente
+  altura_inicio: 0.2
+  altura_fim: 0.6
+  atraso: 0.0         # s parado antes de comecar
+  duracao: 8.0        # s da rampa em cosseno
+  chi: 2.0            # rigidez por area da extensao harmonica

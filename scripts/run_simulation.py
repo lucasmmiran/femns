@@ -11,6 +11,7 @@ import torch
 import yaml
 from tqdm import tqdm
 
+import femns.dente_crescendo as dente_crescendo
 import femns.valvula_rotacao as valvula_rotacao
 from femns.boundary import assign_boundary_names, build_boundary_conditions
 from femns.elemento import elemento_por_nome
@@ -187,6 +188,48 @@ def main():
             Y[:npoints] = torch.from_numpy(movimento.Y).to(device)
             X, Y = atualiza_nos_extras(IEN, X, Y)
 
+    # Dente na parede crescendo para dentro do canal (femns.dente_crescendo):
+    # pistao rigido saindo do piso -- topo sobe, laterais deslizam, interior
+    # pela extensao harmonica com rigidez por area. IEN fixa; o sistema e'
+    # remontado a cada passo. Dirichlet do fluido no grupo do dente: (0, dh/dt).
+    dc_cfg = cfg.get("dente_crescendo") or {}
+    dc_enabled = dc_cfg.get("enabled", False)
+    mov_dente = None
+    if dc_enabled:
+        if vr_enabled or cfg.get("mesh_motion", {}).get("enabled", False):
+            raise ValueError("dente_crescendo nao combina com valvula_rotacao nem mesh_motion; use um so.")
+        dc_grupo = dc_cfg.get("grupo", "dente")
+        contorno_d = dente_crescendo.preparar(mesh.X, mesh.Y, mesh.IENbound, mesh.IENboundElem, dc_grupo)
+        dc_h_ini = float(dc_cfg.get("altura_inicio", contorno_d.h0))
+        dc_h_fim = float(dc_cfg["altura_fim"])
+        dc_dur = float(dc_cfg.get("duracao", Iter * dt))
+        dc_atraso = float(dc_cfg.get("atraso", 0.0))
+        idx_dente = np.array([i for i in range(nnodes) if ccName[i] == dc_grupo], dtype=int)
+        if len(idx_dente) == 0 or (~has_vx_bc[idx_dente] | ~has_vy_bc[idx_dente]).any():
+            raise ValueError(f"dente_crescendo: de' ao grupo {dc_grupo!r} `{{vx: 0.0, vy: 0.0}}` em "
+                             f"boundary.conditions (o valor e' substituido a cada passo por (0, dh/dt)).")
+        idx_dente_t = torch.from_numpy(idx_dente).to(device)
+        mov_dente = dente_crescendo.MovimentoDente(contorno_d, mesh.IEN, mesh.X, mesh.Y,
+                                                   chi=float(dc_cfg.get("chi", 2.0)))
+        for h in (dc_h_ini, dc_h_fim):
+            if contorno_d.y_piso + h >= contorno_d.y_teto:
+                raise ValueError(f"dente_crescendo: altura {h} encosta na parede oposta "
+                                 f"(folga {contorno_d.y_teto - contorno_d.y_piso:.4g})")
+        print(f"Dente crescendo ({dc_grupo!r}): altura {dc_h_ini} -> {dc_h_fim} em {dc_dur} s apos {dc_atraso} s "
+              f"(rampa em cosseno; malha gerada com altura {contorno_d.h0:.4g}, x em "
+              f"[{contorno_d.x_esq:.4g}, {contorno_d.x_dir:.4g}])")
+        print(f"  velocidade maxima do topo = {abs(dc_h_fim - dc_h_ini) * 0.5 * np.pi / dc_dur:.4f} | "
+              f"{len(contorno_d.idx_movel)} vertices moveis ({len(contorno_d.idx_lateral)} nas laterais) | "
+              f"Dirichlet do pistao em {len(idx_dente)} nos | extensao harmonica chi = {mov_dente.chi}")
+        if abs(dc_h_ini - contorno_d.h0) > 1e-12:
+            info_pre = mov_dente.passo(dc_h_ini)
+            if info_pre["invertidos"]:
+                raise RuntimeError(f"a malha inverte ao levar o dente a altura_inicio ({info_pre})")
+            print(f"  malha levada a altura_inicio (q_min = {info_pre['q_min']:.3f})")
+            X[:npoints] = torch.from_numpy(mov_dente.X).to(device)
+            Y[:npoints] = torch.from_numpy(mov_dente.Y).to(device)
+            X, Y = atualiza_nos_extras(IEN, X, Y)
+
     print(f"Tempo ate o assembly: {round(timer() - start, 2)}")
 
     # Montagem do sistema (assembly + matriz de bloco + condicoes de contorno).
@@ -306,6 +349,7 @@ def main():
     sincronizar = torch.cuda.synchronize if device.type == "cuda" else (lambda: None)
 
     vm_nao_nula = False  # a velocidade da malha imposta na parede no passo anterior era != 0
+    remontar_parede = False
     info_mov = None
     pbar = tqdm(range(Iter))
     for n in pbar:
@@ -348,14 +392,45 @@ def main():
                 bc_dirichlet[2][idx_mov] = wy[idx_mov]
                 remontador.definir_valores_cc(vx_cc, vy_cc)
                 vm_nao_nula = bool(np.any(wx[idx_mov]) or np.any(wy[idx_mov]))
+                remontar_parede = True
 
-                beta_anterior = beta
-                sistema = remontador.remontar(X, Y, beta=(None if beta_por_passo else beta))
-                beta = sistema.beta
-                precond = montar_precondicionador(opcoes.precondicionador, sistema, dt, Re, passos_cheb,
-                                                  opcoes.subsolver)
-                if beta_por_passo and beta != beta_anterior:
-                    x0[2 * nnodes:] *= beta_anterior / beta
+        if dc_enabled:
+            # Leva o dente a altura do fim deste passo e impoe (0, dh/dt) nas
+            # paredes dele (pistao rigido).
+            h_nova = valvula_rotacao.theta_em((n + 1) * dt, dc_h_ini, dc_h_fim, dc_dur, dc_atraso)
+            moveu = h_nova != mov_dente.altura
+            if moveu or vm_nao_nula:
+                h_antiga = mov_dente.altura
+                if moveu:
+                    info_mov = mov_dente.passo(h_nova)
+                    if info_mov["invertidos"] > 0:
+                        raise RuntimeError(
+                            f"a malha do dente inverteu {info_mov['invertidos']} elemento(s) na iteracao {n} "
+                            f"(altura = {info_mov['altura']:.4f}, q_min = {info_mov['q_min']:.3f}). "
+                            f"Com IEN fixa nao ha retriangulacao.")
+                    X[:npoints] = torch.from_numpy(mov_dente.X).to(device)
+                    Y[:npoints] = torch.from_numpy(mov_dente.Y).to(device)
+                    X, Y = atualiza_nos_extras(IEN, X, Y)
+                _, uy = dente_crescendo.velocidade_pistao(ccName, dc_grupo, (mov_dente.altura - h_antiga) / dt,
+                                                          nnodes)
+                vx_cc[idx_dente_t] = 0.0
+                vy_cc[idx_dente_t] = torch.from_numpy(uy[idx_dente]).to(device)
+                bc_dirichlet[0][idx_dente] = 0.0
+                bc_dirichlet[2][idx_dente] = uy[idx_dente]
+                remontador.definir_valores_cc(vx_cc, vy_cc)
+                vm_nao_nula = bool(np.any(uy[idx_dente]))
+                remontar_parede = True
+
+        if remontar_parede:
+            # geometria e/ou velocidade da parede mudaram: remonta o sistema
+            remontar_parede = False
+            beta_anterior = beta
+            sistema = remontador.remontar(X, Y, beta=(None if beta_por_passo else beta))
+            beta = sistema.beta
+            precond = montar_precondicionador(opcoes.precondicionador, sistema, dt, Re, passos_cheb,
+                                              opcoes.subsolver)
+            if beta_por_passo and beta != beta_anterior:
+                x0[2 * nnodes:] *= beta_anterior / beta
 
         if mm_enabled:
             # Move a malha para o instante deste passo e remonta o sistema na
@@ -407,12 +482,16 @@ def main():
             pbar.set_postfix(iters=info["iters"], residual=f'{info["residual_verdadeiro"]:.1e}',
                              theta=f'{np.degrees(movimento.theta):.3f}',
                              q_min=f'{info_mov["q_min"]:.3f}' if info_mov else "-")
+        elif dc_enabled:
+            pbar.set_postfix(iters=info["iters"], residual=f'{info["residual_verdadeiro"]:.1e}',
+                             altura=f'{mov_dente.altura:.4f}',
+                             q_min=f'{info_mov["q_min"]:.3f}' if info_mov else "-")
         else:
             pbar.set_postfix(iters=info["iters"], residual=f'{info["residual_verdadeiro"]:.1e}')
 
         # O campo recem-resolvido vive na geometria deste passo: ela vira a
         # referencia de interpolacao do proximo (ver X_campo acima).
-        if mm_enabled or vr_enabled:
+        if mm_enabled or vr_enabled or dc_enabled:
             X_campo, Y_campo = X.clone(), Y.clone()
 
         vx_sol = vx[:npoints]
@@ -445,6 +524,15 @@ def main():
                         f.write("iteracao,theta_graus,q_min,q_med,area_min,recusados\n")
                     f.write(f"{n + 1},{np.degrees(movimento.theta):.6f},{info_mov['q_min']:.6f},"
                             f"{info_mov['q_med']:.6f},{info_mov['area_min']:.6e},{info_mov['recusados']}\n")
+            if dc_enabled and info_mov is not None:
+                # historico da malha do dente, uma linha por frame gravado
+                caminho_mov = os.path.join(output_dir, "movimento_malha.csv")
+                novo = not os.path.exists(caminho_mov) or n + 1 == vtk_interval
+                with open(caminho_mov, "w" if novo else "a") as f:
+                    if novo:
+                        f.write("iteracao,altura,q_min,q_med,area_min\n")
+                    f.write(f"{n + 1},{mov_dente.altura:.6f},{info_mov['q_min']:.6f},"
+                            f"{info_mov['q_med']:.6f},{info_mov['area_min']:.6e}\n")
             updated_points[:, 0] = X[:npoints].cpu().numpy()
             updated_points[:, 1] = Y[:npoints].cpu().numpy()
 

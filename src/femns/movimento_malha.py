@@ -241,6 +241,25 @@ def laplaciano_p1(IEN, X, Y, n: int, chi: float = 0.0) -> sp.csr_matrix:
                          shape=(n, n))
 
 
+def extensao_harmonica(IEN, X, Y, contorno: np.ndarray, bx: np.ndarray, by: np.ndarray, chi: float):
+    """Extensao harmonica do deslocamento `b` do contorno: `K_II e_I = -K_IB b_B`.
+
+    `K` e' o Laplaciano P1 com rigidez por area (`laplaciano_p1`, `chi`) na
+    geometria `(X, Y)`; `contorno` e' a mascara dos vertices prescritos. Devolve
+    `(ex, ey)` com o valor de `b` nos vertices de contorno.
+    """
+    n = len(X)
+    K = laplaciano_p1(IEN, X, Y, n, chi)
+    ii, B = np.flatnonzero(~contorno), np.flatnonzero(contorno)
+    lu = spla.splu(K[ii][:, ii].tocsc())
+    KIB = K[ii][:, B]
+    ex, ey = np.zeros(n), np.zeros(n)
+    ex[ii] = lu.solve(-(KIB @ bx[B]))
+    ey[ii] = lu.solve(-(KIB @ by[B]))
+    ex[B], ey[B] = bx[B], by[B]
+    return ex, ey
+
+
 # =============================================================================
 # 5. O movimento
 # =============================================================================
@@ -302,14 +321,7 @@ class MovimentoValvula:
 
     def _extensao(self, bx: np.ndarray, by: np.ndarray):
         """Extensao harmonica (K e = 0 no interior) do resto `b` no contorno."""
-        K = laplaciano_p1(self.IEN, self.X, self.Y, self.n, self.o.chi)
-        ii, B = self.interior, np.flatnonzero(self.c.contorno)
-        lu = spla.splu(K[ii][:, ii].tocsc())
-        KIB = K[ii][:, B]
-        ex, ey = np.zeros(self.n), np.zeros(self.n)
-        ex[ii] = lu.solve(-(KIB @ bx[B]))
-        ey[ii] = lu.solve(-(KIB @ by[B]))
-        return ex, ey
+        return extensao_harmonica(self.IEN, self.X, self.Y, self.c.contorno, bx, by, self.o.chi)
 
     def _alvo(self):
         ii = self.interior
