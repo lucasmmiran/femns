@@ -1,6 +1,6 @@
 """Validacao do config de simulacao -- unico lugar com as regras.
 
-Sem dependencia de torch/numpy -- e' importado tanto pelo CLI
+Sem dependencia de torch (numpy/scipy so pela validacao da geometria movel) -- e' importado tanto pelo CLI
 (`scripts/run_simulation.py`) quanto pela GUI (`femns.webui.jobs`, que valida
 antes de abrir o subprocesso, para devolver o erro na hora no formulario, e
 evita carregar o solver no processo do servidor). As mensagens de erro saem
@@ -8,6 +8,9 @@ iguais no terminal e na GUI.
 """
 
 from dataclasses import dataclass
+
+import femns.geometria_movel as geometria_movel
+from femns.movimento_malha import opcoes_movimento
 
 DEFAULT_BICGSTAB_TOL = 1e-8
 DEFAULT_BICGSTAB_MAX_ITER = 2000
@@ -136,6 +139,15 @@ def validar_config(cfg: dict) -> ParametrosSimulacao:
             "para malha movel use mesh_motion, ou a tag v1.0 para o experimento antigo.")
 
     opcoes = solver_options(sim)
+
+    # geometria movel (bloco novo ou os antigos valvula_rotacao/dente_crescendo,
+    # convertidos): valida corpos/contornos e as opcoes do interior sem a malha
+    bloco_gm = geometria_movel.bloco_do_config(cfg)
+    if bloco_gm is not None:
+        if (cfg.get("mesh_motion") or {}).get("enabled", False):
+            raise ValueError("geometria_movel e mesh_motion movem a malha de formas incompativeis; use um so.")
+        config_gm = geometria_movel.ler_config(bloco_gm, duracao_padrao=float(dt) * iterations)
+        opcoes_movimento(config_gm.interior)
 
     boundary = cfg.get("boundary") or {}
     if not boundary.get("priority") or not boundary.get("conditions"):

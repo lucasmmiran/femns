@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import scipy.sparse.linalg as spla
 
+import femns.geometria_movel as gm
 import femns.movimento_malha as mm
 import femns.valvula_rotacao as vr
 from femns.mesh import read_mesh
@@ -19,9 +20,17 @@ def malha():
     return read_mesh(MALHA)
 
 
+R = float(np.hypot(0.5, 1.0))
+
+
 @pytest.fixture(scope="module")
 def contorno(malha):
-    return vr.preparar(malha.IEN, malha.X, malha.Y, malha.IENbound, malha.IENboundElem, H=0.5, L=2.0, theta0=TH0)
+    cfg = gm.ler_config(gm.de_valvula_rotacao({"theta0": 10.0, "theta_fim": 20.0}), duracao_padrao=1.0)
+    return gm.preparar(cfg, malha.X, malha.Y, malha.IENbound, malha.IENboundElem)
+
+
+def _th(graus):
+    return {"esfera": float(np.radians(graus))}
 
 
 def test_valor_medio_reproduz_a_malha_e_movimento_afim(malha, contorno):
@@ -62,18 +71,19 @@ def test_odt_num_quadrado_simetrico_e_ponto_fixo():
     {"extensao": {"a3": 1.0}},
 ])
 def test_invariantes_do_passo(malha, contorno, bloco):
-    mv = mm.MovimentoValvula(contorno, malha.IEN, malha.X, malha.Y, mm.opcoes_movimento(bloco))
+    mv = mm.MovimentoMalha(contorno, malha.IEN, malha.X, malha.Y, mm.opcoes_movimento(bloco))
     area0 = mm.area_com_sinal(mv.IEN, mv.X, mv.Y).sum()
     fixos = contorno.contorno.copy()
     fixos[contorno.idx_movel] = False
-    for th in np.radians(np.linspace(10.1, 12.0, 20)):  # subpassos automaticos (desloc_max_h)
-        info = mv.passo(th)
+    for th in np.linspace(10.1, 12.0, 20):  # subpassos automaticos (desloc_max_h)
+        info = mv.passo(_th(th))
     assert info["invertidos"] == 0
     np.testing.assert_array_equal(mv.X[fixos], malha.X[fixos])          # tubo e juntas nunca andam
     np.testing.assert_array_equal(mv.Y[fixos], malha.Y[fixos])
     arco = contorno.idx_arco
-    np.testing.assert_allclose(np.hypot(mv.X[arco], mv.Y[arco]), contorno.geo.r, atol=1e-14)
-    idx, xr, yr = vr.posicoes_rigidas(contorno, np.radians(12.0))
+    np.testing.assert_allclose(np.hypot(mv.X[arco], mv.Y[arco]), R, atol=1e-14)
+    idx = contorno.rigido["esfera"]
+    xr, yr = vr.rotacao(np.radians(12.0) - TH0, malha.X[idx], malha.Y[idx])
     np.testing.assert_allclose(mv.X[idx], xr, atol=1e-14)               # esfera: rotacao rigida exata
     # a area do dominio so muda pela corda poligonal dos arcos (que esticam)
     assert info["area_total"] == pytest.approx(area0, abs=1e-4)
@@ -81,10 +91,10 @@ def test_invariantes_do_passo(malha, contorno, bloco):
 
 def test_extensao_e_harmonica(malha, contorno):
     """a3 = 1, sem rotacao nem suavizacao: o deslocamento do interior resolve K d = 0."""
-    mv = mm.MovimentoValvula(contorno, malha.IEN, malha.X, malha.Y, mm.CONTROLE)
+    mv = mm.MovimentoMalha(contorno, malha.IEN, malha.X, malha.Y, mm.CONTROLE)
     X0, Y0 = mv.X.copy(), mv.Y.copy()
     K = mm.laplaciano_p1(mv.IEN, X0, Y0, mv.n, chi=2.0)
-    assert mv.passo(np.radians(10.01))["subpassos"] == 1
+    assert mv.passo(_th(10.01))["subpassos"] == 1
     d = mv.X - X0
     ii = mv.interior
     np.testing.assert_allclose((K @ d)[ii], 0.0, atol=1e-10 * np.abs(K).max())
@@ -103,9 +113,9 @@ def test_guarda_recusa_movimento_que_inverte():
     Xc[n], Yc[n] = (W @ X)[n], (W @ Y)[n]
     assert (mm.area_com_sinal(IEN, Xc, Yc) <= 0).any()  # sem guarda, inverte
 
-    c = vr.ContornoValvula(geo=vr.GeometriaValvula(), theta0=0.1, X0=X, Y0=Y,
-                           contorno=np.arange(n + 1) < n, idx_rigido=np.empty(0, int), arcos=[])
-    mv = mm.MovimentoValvula(c, IEN, X, Y, mm.OpcoesMovimento(rotacao="nenhuma", pesos="uniforme",
+    c = gm.GeometriaMovel(cfg=gm.ConfigGeometria(corpos={}, contornos={}, interior=None), X0=X, Y0=Y,
+                          contorno=np.arange(n + 1) < n, rigido={}, arcos=[], retas=[], superficie={})
+    mv = mm.MovimentoMalha(c, IEN, X, Y, mm.OpcoesMovimento(rotacao="nenhuma", pesos="uniforme",
                                                             a2=1.0, varreduras=1))
     recusados = mv._corrigir()
     assert recusados == 1
@@ -113,8 +123,8 @@ def test_guarda_recusa_movimento_que_inverte():
 
 
 def test_subpassos_quando_o_contorno_anda_muito(malha, contorno):
-    mv = mm.MovimentoValvula(contorno, malha.IEN, malha.X, malha.Y, mm.CONTROLE)
-    info = mv.passo(np.radians(11.0))
+    mv = mm.MovimentoMalha(contorno, malha.IEN, malha.X, malha.Y, mm.CONTROLE)
+    info = mv.passo(_th(11.0))
     assert info["subpassos"] > 1 and info["invertidos"] == 0
 
 

@@ -28,6 +28,7 @@ from timeit import default_timer as timer
 
 import numpy as np
 
+import femns.geometria_movel as gm
 import femns.movimento_malha as mm
 import femns.valvula_rotacao as vr
 from femns.mesh import read_mesh
@@ -73,39 +74,45 @@ def parse_args():
 def rodar(args, nome, bloco):
     m = read_mesh(args.malha)
     th0 = np.radians(args.theta0)
-    c = vr.preparar(m.IEN, m.X, m.Y, m.IENbound, m.IENboundElem, H=args.H, L=args.L, theta0=th0)
-    raio = 1.5 * c.geo.r
+    vr.conferir_corda(m.X, m.Y, m.IENbound, m.IENboundElem, args.H, args.L, th0)
+    cfg = gm.ler_config(gm.de_valvula_rotacao({"H": args.H, "L": args.L, "theta0": args.theta0,
+                                                "theta_fim": args.theta_fim}), duracao_padrao=1.0)
+    c = gm.preparar(cfg, m.X, m.Y, m.IENbound, m.IENboundElem)
+    raio = 1.5 * vr.GeometriaValvula(H=args.H, L=args.L).r
+
+    def graus(info):
+        return float(np.degrees(info["estado"]["esfera"]))
     res = {"nome": nome, "bloco": bloco}
 
     # rodada 'lei'
-    mv = mm.MovimentoValvula(c, m.IEN, m.X, m.Y, mm.opcoes_movimento(bloco))
+    mv = mm.MovimentoMalha(c, m.IEN, m.X, m.Y, mm.opcoes_movimento(bloco))
     marcos = {15.0: None, 20.0: None}
     t0, inv = timer(), None
     for k in range(1, args.passos + 1):
         th = vr.theta_em(k / args.passos, th0, np.radians(args.theta_fim), 1.0)
-        info = mv.passo(th)
+        info = mv.passo({"esfera": th})
         if info["invertidos"] and inv is None:
-            inv = info["theta_deg"]
+            inv = graus(info)
             break
         for alvo in marcos:
-            if marcos[alvo] is None and info["theta_deg"] >= alvo - 1e-9:
-                marcos[alvo] = dict(info, gradacao=mv.gradacao(raio))
+            if marcos[alvo] is None and graus(info) >= alvo - 1e-9:
+                marcos[alvo] = dict(info, theta_deg=graus(info), gradacao=mv.gradacao(raio))
     res["lei"] = dict(ms_por_passo=1e3 * (timer() - t0) / k, inverte_em=inv,
                       marcos={str(a): v for a, v in marcos.items()})
 
     # rodada 'alcance'
-    mv = mm.MovimentoValvula(c, m.IEN, m.X, m.Y, mm.opcoes_movimento(bloco))
+    mv = mm.MovimentoMalha(c, m.IEN, m.X, m.Y, mm.opcoes_movimento(bloco))
     limiares = {0.3: None, 0.2: None, 0.1: None}
     hist, inv = [], None
     for th in np.arange(args.theta0 + args.passo_alcance, args.theta_max + 1e-9, args.passo_alcance):
-        info = mv.passo(np.radians(th))
+        info = mv.passo({"esfera": float(np.radians(th))})
         if abs(th - round(th)) < 1e-6:
             hist.append((round(th), info["q_min"], mv.gradacao(raio)))
         for q in limiares:
             if limiares[q] is None and info["q_min"] < q:
-                limiares[q] = info["theta_deg"]
+                limiares[q] = graus(info)
         if info["invertidos"]:
-            inv = info["theta_deg"]
+            inv = graus(info)
             break
     res["alcance"] = dict(qmin_abaixo_de={str(q): v for q, v in limiares.items()}, inverte_em=inv, historico=hist)
     return res

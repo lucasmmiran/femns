@@ -25,8 +25,9 @@ velocidade — vértices + nó de aresta —, P1 para pressão).
 │   ├── semi_lagrangian.py   # advecção semi-Lagrangeana: busca por elemento (Localizador), backtrace, interceptação de contorno
 │   ├── boundary.py          # condições de contorno: nomes por nó, valores, aplicação na matriz
 │   ├── moving_mesh.py        # malha móvel: oscilação de todos os nós interiores (mesh_motion)
-│   ├── valvula_rotacao.py    # válvula esfera girando: classificação e cinemática do contorno (valvula_rotacao)
-│   ├── movimento_malha.py    # movimento do interior por soma ponderada de deslocamentos (valvula_rotacao.movimento)
+│   ├── geometria_movel.py    # contornos móveis: corpos (rotação/translação) e contornos fixos/rígidos/deslizantes (geometria_movel)
+│   ├── movimento_malha.py    # movimento do interior por soma ponderada de deslocamentos (geometria_movel.interior)
+│   ├── valvula_rotacao.py    # válvula esfera: geometria, conferência da corda e lei temporal (rampa em cosseno)
 │   ├── solver.py             # montagem do sistema global e passo de tempo (Euler implícito)
 │   ├── krylov.py             # BiCGSTAB, MINRES, Chebyshev-Jacobi (torch puro, CPU/GPU)
 │   ├── precondicionadores.py # pré-condicionadores de bloco (Cahouet–Chabard) para o sistema de sela
@@ -63,8 +64,9 @@ nós sem precisar de uma malha `.msh` nem rodar a simulação inteira.
 | `reassembly.py` | `Remontador`: único caminho de montagem do sistema global — monta o sistema inicial conferindo contra `build_system_matrix` + `apply_boundary_conditions`, e com `mesh_motion` remonta a cada passo só recalculando valores no padrão de esparsidade fixo | não resolve o sistema |
 | `boundary.py` | resolve qual nome de contorno cada nó tem (por prioridade) e monta os índices/valores de Dirichlet; zera linhas da matriz global e põe 1 na diagonal | não decide *quais* são os valores físicos — isso vem do config |
 | `moving_mesh.py` | move a malha: **todos os nós interiores** oscilando ao longo de retas próprias (`mesh_motion`) | não remonta o sistema (isso é do script, que remonta a cada passo quando `mesh_motion` está ligado) |
-| `valvula_rotacao.py` | contorno da válvula esfera: classifica os vértices (esfera rígida, arcos que deslizam no círculo, resto fixo — com ou sem filetes nas quinas), posição exata por ângulo e lei temporal | não move o interior nem impõe condição no fluido |
-| `movimento_malha.py` | interior da malha da válvula: soma ponderada de rotação, suavização (valor médio/centroide/ODT, com guarda de qualidade) e extensão harmônica, em preditor–corretor | não remonta o sistema |
+| `geometria_movel.py` | geometria móvel genérica: lê o bloco `geometria_movel` (corpos com lei de movimento + contornos fixos/rígidos/deslizantes), classifica os vértices de contorno, dá a posição exata do contorno por estado dos corpos e a velocidade que o fluido vê em cada parede; converte os blocos antigos `valvula_rotacao`/`dente_crescendo` | não move o interior nem remonta o sistema |
+| `movimento_malha.py` | interior da malha: soma ponderada de rotação, suavização (valor médio/centroide/ODT, com guarda de qualidade) e extensão harmônica, em preditor–corretor (`MovimentoMalha`) | não remonta o sistema |
+| `valvula_rotacao.py` | o que é só da válvula esfera: grandezas geométricas, conferência da corda contra `H`, `L`, `theta0`, e a lei temporal em cosseno usada por todos os corpos | não classifica nem move o contorno |
 | `solver.py` | monta a matriz de bloco global (vx, vy, p) e resolve um passo de tempo | não conhece a malha nem faz I/O |
 | `io.py` | escreve pontos/células/campos em `.vtk` via `meshio`; é o único lugar que sabe o nome dos frames (`caminho_frame`, `listar_frames`, `ultimo_frame` — grava `solucao-N.vtk`, lê também o `solucao -N.vtk` da v1.0) e acha blocos de um tipo nas células do meshio (`conectividade`, todos os blocos concatenados) | não decide o diretório de saída (isso é do config) |
 | `simconfig.py` | valida o config inteiro (`validar_config`) e aplica os defaults — sem `torch`, então o servidor da GUI usa a mesma função antes de abrir o subprocesso | não checa se o arquivo da malha existe (cada cliente faz isso) |
@@ -191,41 +193,64 @@ benchmark_xlsx: solucoes/benchmarks.xlsx
   caso de **validação exata**: a solução analítica `6y(1−y)` passa a
   valer no canal inteiro, sem região de desenvolvimento (ver
   `scripts/plot_poiseuille_validacao.py`).
-- **`valvula_rotacao`**: válvula esfera com furo girando dentro do tubo
-  (malha com IEN fixa, sem retriangulação; exemplo completo em
-  `configs/valvula_10g.yaml`, plano em `docs/planos/plano_movimento_malha_1210.md`).
-  A esfera (corda e filetes dela) gira rígida, os nós dos arcos deslizam
-  sobre o círculo, o tubo fica parado, e o interior segue
+- **`geometria_movel`**: contornos que se movem com um corpo, numa malha
+  com IEN fixa (sem retriangulação). Exemplos completos em
+  `configs/valvula_10g.yaml` (válvula esfera girando) e
+  `configs/canal_dente.yaml` (dente subindo do piso); também editável na
+  GUI, aba Móvel → Geometria móvel.
 
   ```yaml
-  valvula_rotacao:
+  geometria_movel:
     enabled: true
-    H: 0.5            # semialtura do tubo
-    L: 2.0            # corda do furo
-    theta0: 10.0      # graus: ângulo em que a malha foi gerada
-    theta_inicio: 10.0
-    theta_fim: 20.0
-    duracao: 8.0      # s da rampa em cosseno (padrão: a simulação inteira)
-    velocidade_malha: [valve_up, valve_down]   # Dirichlet do fluido = velocidade do nó da malha
-    velocidade_esfera: [outter_wall]           # Dirichlet = ω×p nos pontos da esfera (0 nos filetes da carcaça)
-    movimento:
-      rotacao: {tipo: radial, rho1: 0.5, rho2: 1.0}   # radial | idw | nenhuma (psi em unidades de r)
-      suavizacao: {pesos: valor_medio, a2: 0.5, varreduras: 3, a2_arco: 0.0, pesos_arco: referencia, q_guarda: 0.5}
-      extensao: {a3: 0.0, chi: 2.0}                    # extensão harmônica (rigidez por área)
-      desloc_max_h: 0.05                               # subpassos de malha acima disso
+    corpos:                 # lei de movimento, compartilhada pelos contornos do corpo
+      esfera:
+        tipo: rotacao       # rotacao: angulos em graus em torno de `centro`
+        centro: [0.0, 0.0]
+        malha: 10.0         # estado em que a malha foi gerada (padrao: inicio)
+        inicio: 10.0
+        fim: 20.0
+        duracao: 8.0        # s da rampa em cosseno (padrao: a simulacao inteira)
+        atraso: 0.0
+      pistao:
+        tipo: translacao    # translacao: deslocamento ao longo de `direcao`
+        direcao: [0.0, 1.0]
+        inicio: 0.0
+        fim: 0.4
+    contornos:              # grupo fisico -> tipo de movimento; nao citado = fixo
+      valve_up: {tipo: rigido, corpo: esfera}
+      outter_wall: {tipo: deslizante, corpo: esfera}             # arco: raio inferido (ou `raio:`)
+      inner_wall: {tipo: deslizante, corpo: esfera, velocidade_fluido: condicao}
+      dente: {tipo: deslizante, corpo: pistao}                   # reta: base parada, ponta com o corpo
+    interior:               # soma ponderada do interior (femns.movimento_malha); omitido = so extensao, chi = 2
+      extensao: {a3: 1.0, chi: 2.0}
+      # rotacao: {tipo: radial, rho1: 0.5, rho2: 1.0}  |  suavizacao: {...}  |  desloc_max_h: 0.05
   ```
 
-  `movimento` omitido = só a extensão harmônica com `chi: 2` (o
-  comportamento anterior) — que foi também a melhor configuração no
-  benchmark de geometria em `valvula_10g.msh`: sem a extensão, a
-  suavização sozinha inverte a malha antes dos 15° (ver o plano, §10). Os grupos de `velocidade_malha` precisam de
-  `{vx: 0.0, vy: 0.0}` em `boundary.conditions` (o valor é trocado a cada
-  passo por `(x^{n+1} − x^n)/dt`). Nos arcos o nó da malha desliza
-  (anda `η·ω×p`), então a velocidade física da superfície da esfera é a de
-  `velocidade_esfera`, `ω×p` com `ω = Δθ/dt` do passo. Incompatível com `mesh_motion`. A
-  qualidade da malha por frame vai para `<output_dir>/movimento_malha.csv`;
-  `scripts/benchmark_movimento_malha.py` compara as configurações só na
-  geometria, sem resolver o escoamento.
+  - **rígido**: anda junto com o corpo, a partir da posição na malha.
+  - **deslizante** com corpo de **rotação** (arco): nós do grupo sobre o
+    círculo de raio `raio` deslizam mantendo a fração do arco; dentro do
+    círculo andam com o corpo; fora ficam parados. Cada arco precisa de
+    exatamente uma ponta ligada à parte rígida do corpo.
+  - **deslizante** com corpo de **translação** (reta): os nós de menor
+    projeção na direção ficam parados (base), os de maior andam com o corpo
+    (ponta) e os do meio deslizam proporcionalmente.
+  - `velocidade_fluido` (Dirichlet do fluido): `malha` = `(x^{n+1} − x^n)/dt`
+    (padrão do rígido); `corpo` = velocidade do ponto material do corpo,
+    `ω×(p−c)` ou `v·direcao` (padrão do deslizante — o nó desliza a uma
+    fração disso); `condicao` = o valor de `boundary.conditions`. Os grupos
+    com `malha`/`corpo` precisam de `{vx: 0.0, vy: 0.0}` em
+    `boundary.conditions` (o valor é trocado a cada passo).
+
+  O tipo de movimento do contorno (rígido/deslizante) é uma **subclasse**
+  de `Contorno` (o comportamento muda); rotação/translação é um
+  **atributo** — o corpo ao qual o contorno está preso — para que todos os
+  contornos do mesmo corpo compartilhem a mesma lei. Os blocos antigos
+  `valvula_rotacao` e `dente_crescendo` continuam aceitos e são convertidos
+  para `geometria_movel` (mesmo resultado, bit a bit na válvula).
+  Incompatível com `mesh_motion`. A qualidade da malha e o estado de cada
+  corpo por frame vão para `<output_dir>/movimento_malha.csv`;
+  `scripts/benchmark_movimento_malha.py` compara as configurações do
+  interior só na geometria, sem resolver o escoamento.
 - **`mesh_motion`**: experimento de malha móvel/ALE — faz **todos os nós
   interiores** (os que não estão em nenhum contorno) oscilarem:
 

@@ -2,7 +2,7 @@
 # escoamento (malha meshes/canal_dente.msh, gerada com o dente de 0,1 x 0,2
 # centrado em x = 0; fonte em meshes/canal_dente.geo). O dente sobe como um
 # pistao rigido saindo do piso: altura 0,2 -> 0,6 numa rampa em cosseno.
-# Movimento em femns.dente_crescendo.
+# Movimento em femns.geometria_movel.
 mesh: meshes/canal_dente.msh
 output_dir: solucoes/canal_dente
 
@@ -26,11 +26,19 @@ boundary:
     dente: {vx: 0.0, vy: 0.0}
     # outlet: sem condicao (saida livre, condicao natural)
 
-dente_crescendo:
+geometria_movel:
   enabled: true
-  grupo: dente
-  altura_inicio: 0.2
-  altura_fim: 0.6
-  atraso: 0.0         # s parado antes de comecar
-  duracao: 8.0        # s da rampa em cosseno
-  chi: 2.0            # rigidez por area da extensao harmonica
+  corpos:
+    pistao:
+      tipo: translacao
+      direcao: [0.0, 1.0]
+      inicio: 0.0       # deslocamento em relacao a malha (dente de 0,2 -> 0,6)
+      fim: 0.4
+      atraso: 0.0       # s parado antes de comecar
+      duracao: 8.0      # s da rampa em cosseno
+  contornos:            # grupos nao citados ficam fixos
+    # laterais esticam (base no piso parada, topo andando com o pistao);
+    # o fluido ve a velocidade do pistao, (0, dh/dt), no dente inteiro
+    dente: {tipo: deslizante, corpo: pistao}
+  interior:
+    extensao: {a3: 1.0, chi: 2.0}   # rigidez por area da extensao harmonica

@@ -6,10 +6,10 @@ Cada vertice anda, por passo de tempo,
 
 organizado como preditor-corretor (plano §5):
 
-1. **contorno**, exato: pontos materiais da esfera por rotacao rigida, arcos
-   esticados entre as pontas, resto parado (`femns.valvula_rotacao`);
+1. **contorno**, exato: rigidos andando com o corpo, deslizantes esticados
+   entre as pontas (arco ou reta), resto parado (`femns.geometria_movel`);
 2. **preditor do interior**: o termo de rotacao (`rotacao`), que arrasta os
-   nos com a esfera -- mistura radial `psi(rho)` ou interpolacao pelo inverso
+   nos com o corpo de rotacao -- mistura radial `psi(rho)` ou interpolacao pelo inverso
    da distancia dos deslocamentos do contorno (Witteveen & Bijl 2009) --,
    mais `a3` vezes a extensao harmonica do que o termo de rotacao nao
    cobriu no contorno (Laplaciano P1 com rigidez por area, `chi`; Johnson &
@@ -41,7 +41,7 @@ import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
-import femns.valvula_rotacao as vr
+import femns.geometria_movel as gm
 
 ROTACOES = ("nenhuma", "radial", "idw")
 PESOS = ("valor_medio", "uniforme", "odt")
@@ -263,26 +263,41 @@ def extensao_harmonica(IEN, X, Y, contorno: np.ndarray, bx: np.ndarray, by: np.n
 # =============================================================================
 # 5. O movimento
 # =============================================================================
-class MovimentoValvula:
-    """Estado da malha (so vertices) e o passo `theta_atual -> theta_novo`.
+class MovimentoMalha:
+    """Estado da malha (so vertices) e o passo `estado -> novo` dos corpos.
 
-    `IEN` so com os 3 vertices. `X`, `Y` (copiados) sao a geometria atual;
-    `passo` atualiza no lugar e devolve o diagnostico.
+    `geo` e' a `femns.geometria_movel.GeometriaMovel` (classificacao do
+    contorno + leis dos corpos). `IEN` so com os 3 vertices. `X`, `Y`
+    (copiados) sao a geometria atual; `estado` o valor atual de cada corpo
+    (angulo ou deslocamento); `passo` atualiza no lugar e devolve o diagnostico.
     """
 
-    def __init__(self, contorno: vr.ContornoValvula, IEN, X, Y, opcoes: OpcoesMovimento):
-        self.c = contorno
+    def __init__(self, geo: gm.GeometriaMovel, IEN, X, Y, opcoes: OpcoesMovimento):
+        self.g = geo
         self.IEN = np.asarray(IEN)[:, :3]
         self.X = np.asarray(X, float).copy()
         self.Y = np.asarray(Y, float).copy()
         self.n = len(self.X)
         self.o = opcoes
-        self.theta = contorno.theta0
-        self.interior = np.flatnonzero(~contorno.contorno)
+        self.estado = geo.estado_malha()
+        self.interior = np.flatnonzero(~geo.contorno)
         self.h0 = tamanho_local(self.IEN, self.X, self.Y, self.n)
         self.q0 = qualidade(self.IEN, self.X, self.Y)
         if self.q0.min() <= 0:
             raise ValueError("malha inicial com elemento invertido (ou orientacao horaria)")
+
+        self._rot = None
+        if opcoes.rotacao == "radial":
+            rot = [n for n, c in geo.corpos.items() if isinstance(c, gm.Rotacao)]
+            if len(rot) != 1:
+                raise ValueError("movimento.rotacao.tipo = radial precisa de exatamente um corpo de rotacao")
+            arcos = [a for a in geo.arcos if a.corpo == rot[0]]
+            if arcos:
+                r = arcos[0].raio
+            else:
+                cx, cy = geo.corpos[rot[0]].centro
+                r = float(np.hypot(self.X[geo.rigido[rot[0]]] - cx, self.Y[geo.rigido[rot[0]]] - cy).max())
+            self._rot = (rot[0], r)
 
         if opcoes.pesos == "valor_medio":
             self.W = pesos_valor_medio(self.IEN, self.X, self.Y, self.n)[self.interior]
@@ -298,20 +313,25 @@ class MovimentoValvula:
 
         self._idw = None
         if opcoes.rotacao == "idw":
-            b = np.flatnonzero(contorno.contorno)
+            b = np.flatnonzero(geo.contorno)
             d = np.hypot(self.X[self.interior, None] - self.X[None, b], self.Y[self.interior, None] - self.Y[None, b])
             w = 1.0 / np.maximum(d, 1e-300) ** opcoes.idw_p
             self._idw = (b, w / w.sum(axis=1, keepdims=True))
 
     # --- termos ---------------------------------------------------------
-    def _rotacao_interior(self, dth: float, dX: np.ndarray, dY: np.ndarray):
+    def _rotacao_interior(self, novo: dict, dX: np.ndarray, dY: np.ndarray):
         """Deslocamento de rotacao do interior e o que ele 'cobre' no contorno."""
         o, ii = self.o, self.interior
         rx, ry = np.zeros(self.n), np.zeros(self.n)
         if o.rotacao == "radial":
-            rho = np.hypot(self.X, self.Y)
-            psi = mistura_radial(rho, o.rho1 * self.c.geo.r, o.rho2 * self.c.geo.r)
-            xr, yr = vr.rotacao(dth, self.X, self.Y)
+            nome, r = self._rot
+            cx, cy = self.g.corpos[nome].centro
+            dth = novo[nome] - self.estado[nome]
+            rho = np.hypot(self.X - cx, self.Y - cy)
+            psi = mistura_radial(rho, o.rho1 * r, o.rho2 * r)
+            c, s = np.cos(dth), np.sin(dth)
+            xr = cx + c * (self.X - cx) - s * (self.Y - cy)
+            yr = cy + s * (self.X - cx) + c * (self.Y - cy)
             rx, ry = psi * (xr - self.X), psi * (yr - self.Y)
         elif o.rotacao == "idw":
             b, w = self._idw
@@ -321,7 +341,7 @@ class MovimentoValvula:
 
     def _extensao(self, bx: np.ndarray, by: np.ndarray):
         """Extensao harmonica (K e = 0 no interior) do resto `b` no contorno."""
-        return extensao_harmonica(self.IEN, self.X, self.Y, self.c.contorno, bx, by, self.o.chi)
+        return extensao_harmonica(self.IEN, self.X, self.Y, self.g.contorno, bx, by, self.o.chi)
 
     def _alvo(self):
         ii = self.interior
@@ -357,39 +377,37 @@ class MovimentoValvula:
         return recusados
 
     # --- passo ------------------------------------------------------------
-    def passo(self, theta_novo: float) -> dict:
-        """Leva a malha de `self.theta` a `theta_novo`, em subpassos se preciso.
+    def passo(self, novo: dict) -> dict:
+        """Leva os corpos de `self.estado` a `novo`, em subpassos se preciso.
 
-        O contorno mais rapido (ponta da corda) anda `r*|dtheta|`; se isso passar
-        de `desloc_max_h` vezes o menor `h` dos vertices moveis, o passo e'
-        dividido (plano §5) -- o corretor so acompanha deslocamentos pequenos.
+        O ponto de contorno mais rapido anda `GeometriaMovel.desloc_max`; se
+        isso passar de `desloc_max_h` vezes o menor `h` dos vertices moveis, o
+        passo e' dividido (plano §5) -- o corretor so acompanha deslocamentos
+        pequenos.
         """
-        movel = self.c.idx_movel
+        movel = self.g.idx_movel
         h_min = self.h0[movel].min() if len(movel) else np.inf
-        n_sub = max(1, int(np.ceil(self.c.geo.r * abs(theta_novo - self.theta) / (self.o.desloc_max_h * h_min))))
+        n_sub = max(1, int(np.ceil(self.g.desloc_max(self.estado, novo) / (self.o.desloc_max_h * h_min))))
+        trajetos = {k: np.linspace(self.estado[k], novo[k], n_sub + 1)[1:] for k in self.estado}
         info, recusados = None, 0
-        for th in np.linspace(self.theta, theta_novo, n_sub + 1)[1:]:
-            info = self._passo_simples(float(th))
+        for i in range(n_sub):
+            info = self._passo_simples({k: float(v[i]) for k, v in trajetos.items()})
             recusados += info["recusados"]
         info["recusados"], info["subpassos"] = recusados, n_sub
         return info
 
-    def _passo_simples(self, theta_novo: float) -> dict:
-        o, c = self.o, self.c
+    def _passo_simples(self, novo: dict) -> dict:
+        o, g = self.o, self.g
         Xn, Yn = self.X.copy(), self.Y.copy()
-        dth = theta_novo - self.theta
 
-        # 1. contorno exato (rigido, depois arcos -- o preditor do arco usa theta)
-        idx, xr, yr = vr.posicoes_rigidas(c, theta_novo)
-        Xc, Yc = self.X.copy(), self.Y.copy()
-        Xc[idx], Yc[idx] = xr, yr
-        vr.prever_arcos(c, Xc, Yc, self.theta, theta_novo)
-        vr.suavizar_arcos(c, Xc, Yc, o.a2_arco, o.varreduras, o.pesos_arco)
+        # 1. contorno exato (rigidos, arcos e retas -- o preditor do arco usa o estado atual)
+        Xc, Yc = g.contorno_em(self.X, self.Y, self.estado, novo)
+        g.suavizar_arcos(Xc, Yc, o.a2_arco, o.varreduras, o.pesos_arco)
         dX, dY = Xc - self.X, Yc - self.Y
-        cont = c.contorno
+        cont = g.contorno
 
         # 2. preditor do interior: rotacao + a3 * extensao do resto no contorno
-        rx, ry = self._rotacao_interior(dth, dX, dY)
+        rx, ry = self._rotacao_interior(novo, dX, dY)
         if o.a3 > 0:
             ex, ey = self._extensao(np.where(cont, dX - rx, 0.0), np.where(cont, dY - ry, 0.0))
             rx, ry = rx + o.a3 * ex, ry + o.a3 * ey
@@ -400,17 +418,17 @@ class MovimentoValvula:
 
         # 3. corretor
         recusados = self._corrigir() if o.a2 > 0 and o.varreduras > 0 else 0
-        self.theta = float(theta_novo)
+        self.estado = dict(novo)
 
         q = qualidade(self.IEN, self.X, self.Y)
         A = area_com_sinal(self.IEN, self.X, self.Y)
         desloc = np.hypot(self.X - Xn, self.Y - Yn)
-        return dict(theta_deg=float(np.degrees(theta_novo)), q_min=float(q.min()), q_med=float(q.mean()),
+        return dict(estado=dict(self.estado), q_min=float(q.min()), q_med=float(q.mean()),
                     invertidos=int((A <= 0).sum()), area_min=float(A.min()), area_total=float(A.sum()),
                     desloc_max_h=float((desloc / self.h0).max()), recusados=recusados)
 
-    def gradacao(self, raio: float) -> float:
-        """Media de `h/h0` nos vertices com `|p| < raio` (1 = gradacao da malha inicial mantida)."""
+    def gradacao(self, raio: float, centro=(0.0, 0.0)) -> float:
+        """Media de `h/h0` nos vertices com `|p - centro| < raio` (1 = gradacao da malha inicial mantida)."""
         h = tamanho_local(self.IEN, self.X, self.Y, self.n)
-        sel = np.hypot(self.X, self.Y) < raio
+        sel = np.hypot(self.X - centro[0], self.Y - centro[1]) < raio
         return float((h[sel] / self.h0[sel]).mean())

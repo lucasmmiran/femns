@@ -398,7 +398,7 @@ const NovaSimulacao = (() => {
       renderBoundaryList();
     }
     for (const [nome, valores] of Object.entries(conditions || {})) {
-      const row = document.querySelector(`.boundary-row[data-name="${CSS.escape(nome)}"]`);
+      const row = document.querySelector(`#boundary-list .boundary-row[data-name="${CSS.escape(nome)}"]`);
       if (!row) continue;
       for (const campo of ["vx", "vy", "p"]) {
         const valor = valores[campo];
@@ -432,7 +432,7 @@ const NovaSimulacao = (() => {
   // pra reconstruir a lista sem perder nada ao mudar a ordem.
   function collectBoundaryConditions(cru) {
     const conditions = {};
-    for (const row of document.querySelectorAll(".boundary-row")) {
+    for (const row of document.querySelectorAll("#boundary-list .boundary-row")) {
       const nome = row.dataset.name;
       const valores = {};
       for (const label of row.querySelectorAll(".comp")) {
@@ -460,7 +460,7 @@ const NovaSimulacao = (() => {
   }
 
   function restoreBoundaryInputs(cru) {
-    for (const row of document.querySelectorAll(".boundary-row")) {
+    for (const row of document.querySelectorAll("#boundary-list .boundary-row")) {
       const estado = cru[row.dataset.name] || {};
       for (const label of row.querySelectorAll(".comp")) {
         const s = estado[label.querySelector("span").textContent];
@@ -493,6 +493,7 @@ const NovaSimulacao = (() => {
     const mesh = currentMesh();
     boundaryOrder = mesh ? [...mesh.boundary_names] : [];
     renderBoundaryList();
+    renderGmContornos();
     if (mesh) {
       loadMeshGeometry(mesh.name)
         .then(() => { colorBoundaryDots(); renderCards(); })
@@ -521,6 +522,251 @@ const NovaSimulacao = (() => {
     const meshName = baseName(meshPath);
     if (meshName && meshes.some((m) => m.name === meshName)) $("f-mesh").value = meshName;
     refreshMeshDependentUI();
+  }
+
+  // -- geometria movel ---------------------------------------------------
+  //
+  // Corpos (lei de movimento: rotacao ou translacao) e contornos presos a eles
+  // (fixo / rigido / deslizante), no formato do bloco `geometria_movel` (ver
+  // femns.geometria_movel). O DOM e' a fonte de verdade: buildConfig le daqui.
+  // Configs antigos com `valvula_rotacao`/`dente_crescendo` sao convertidos ao
+  // carregar (mesma conversao do backend).
+
+  // bloco `interior` carregado: a GUI so edita o chi da extensao, o resto passa intacto
+  let gmInteriorBase = null;
+
+  const GM_TIPO_NOME = { rotacao: "rotação", translacao: "translação" };
+  const GM_VEL_PADRAO = { rigido: "malha", deslizante: "corpo" };
+
+  function gmDeValvula(v) {
+    const H = v.H ?? 0.5, L = v.L ?? 2.0;
+    const vm = v.velocidade_malha || [], ve = v.velocidade_esfera || [];
+    const vel = (g) => (vm.includes(g) ? "malha" : ve.includes(g) ? "corpo" : "condicao");
+    const contornos = {};
+    for (const g of v.grupos_corda || ["valve_up", "valve_down"]) contornos[g] = { tipo: "rigido", corpo: "esfera", velocidade_fluido: vel(g) };
+    for (const g of v.grupos_arco || ["outter_wall", "inner_wall"]) {
+      contornos[g] = { tipo: "deslizante", corpo: "esfera", velocidade_fluido: vel(g), raio: Math.hypot(H, L / 2) };
+    }
+    const esfera = { tipo: "rotacao", centro: [0, 0], malha: v.theta0, inicio: v.theta_inicio ?? v.theta0,
+                     fim: v.theta_fim, atraso: v.atraso ?? 0 };
+    if (v.duracao != null) esfera.duracao = v.duracao;
+    return { enabled: !!v.enabled, corpos: { esfera }, contornos, interior: v.movimento ?? null };
+  }
+
+  function gmDeDente(d) {
+    const pistao = { tipo: "translacao", direcao: [0, 1], malha: d.altura_inicio, inicio: d.altura_inicio,
+                     fim: d.altura_fim, atraso: d.atraso ?? 0 };
+    if (d.duracao != null) pistao.duracao = d.duracao;
+    return { enabled: !!d.enabled, corpos: { pistao },
+             contornos: { [d.grupo || "dente"]: { tipo: "deslizante", corpo: "pistao" } },
+             interior: { extensao: { a3: 1.0, chi: d.chi ?? 2.0 } } };
+  }
+
+  function gmDoConfig(c) {
+    if (c.geometria_movel) return c.geometria_movel;
+    if (c.valvula_rotacao) return gmDeValvula(c.valvula_rotacao);
+    if (c.dente_crescendo) return gmDeDente(c.dente_crescendo);
+    return null;
+  }
+
+  function gmCorpoRow(nome, c) {
+    const v = (x) => (x == null ? "" : String(x));
+    const campo = (k, rotulo, valor, cls) => el("label", { class: `field ${cls || ""}` }, [
+      el("span", { text: rotulo }),
+      el("input", { type: "number", step: "any", "data-k": k, value: v(valor) }),
+    ]);
+    const tipo = el("select", { class: "gm-tipo" }, [
+      el("option", { value: "rotacao", text: "rotação" }), el("option", { value: "translacao", text: "translação" }),
+    ]);
+    tipo.value = c.tipo === "translacao" ? "translacao" : "rotacao";
+    const centro = c.centro || [0, 0], dir = c.direcao || [0, 1];
+    const row = el("div", { class: "gm-corpo", "data-nome": nome }, [
+      el("div", { class: "gm-corpo-head" }, [
+        el("input", { type: "text", class: "gm-nome", value: nome, placeholder: "nome do corpo", title: "nome do corpo" }),
+        tipo,
+        el("button", { type: "button", class: "icon-btn", title: "remover corpo", text: "×",
+                       onclick: () => { row.remove(); gmSync(); formToDraft(); } }),
+      ]),
+      el("div", { class: "gm-grid" }, [
+        campo("cx", "centro x", centro[0], "so-rot"), campo("cy", "centro y", centro[1], "so-rot"),
+        campo("dx", "direção x", dir[0], "so-trans"), campo("dy", "direção y", dir[1], "so-trans"),
+        campo("malha", "malha", c.malha), campo("inicio", "início", c.inicio ?? 0), campo("fim", "fim", c.fim ?? 0),
+        campo("duracao", "duração (s)", c.duracao), campo("atraso", "atraso (s)", c.atraso ?? 0),
+      ]),
+    ]);
+    return row;
+  }
+
+  function gmLerCorpos() {
+    return [...document.querySelectorAll("#gm-corpos .gm-corpo")].map((row) => {
+      const num = (k) => parseFloat(row.querySelector(`[data-k="${k}"]`).value);
+      return { nome: row.querySelector(".gm-nome").value.trim(), tipo: row.querySelector(".gm-tipo").value, num };
+    });
+  }
+
+  function gmContornoRow(nome, c) {
+    const classe = el("select", { class: "gm-class", title: "tipo de movimento do contorno" });
+    classe.dataset.inicial = c && c.tipo && c.tipo !== "fixo" ? `${c.tipo}:${c.corpo}` : "fixo";
+    const vel = el("select", { class: "gm-vel", title: "velocidade que o fluido vê nesse contorno" }, [
+      el("option", { value: "", text: "fluido: padrão" }),
+      el("option", { value: "malha", text: "fluido: malha" }),
+      el("option", { value: "corpo", text: "fluido: corpo" }),
+      el("option", { value: "condicao", text: "fluido: condição" }),
+    ]);
+    vel.value = (c && c.velocidade_fluido) || "";
+    const raio = el("input", { type: "number", step: "any", min: "0", class: "gm-raio", placeholder: "raio: auto",
+                               title: "raio do arco (vazio = inferido da malha)", value: c && c.raio != null ? String(c.raio) : "" });
+    return el("li", { class: "boundary-row gm-contorno", "data-name": nome }, [
+      el("div", { class: "bc-head" }, [el("span", { class: "bc-dot" }), el("span", { class: "name", text: nome }),
+                                       el("span", { class: "gm-desc" })]),
+      el("div", { class: "gm-ctl" }, [classe, vel, raio]),
+    ]);
+  }
+
+  // estado atual dos contornos no DOM (para preservar ao redesenhar)
+  function gmLerContornos() {
+    const out = {};
+    for (const row of document.querySelectorAll("#gm-contornos .gm-contorno")) {
+      const [tipo, corpo] = row.querySelector(".gm-class").value.split(":");
+      const vel = row.querySelector(".gm-vel").value;
+      const raio = parseFloat(row.querySelector(".gm-raio").value);
+      out[row.dataset.name] = tipo === "fixo" ? { tipo: "fixo" }
+        : { tipo, corpo, ...(vel ? { velocidade_fluido: vel } : {}), ...(Number.isFinite(raio) ? { raio } : {}) };
+    }
+    return out;
+  }
+
+  function renderGmCorpos(corpos) {
+    const box = $("gm-corpos");
+    box.innerHTML = "";
+    for (const [nome, c] of Object.entries(corpos || {})) box.appendChild(gmCorpoRow(nome, c));
+  }
+
+  function renderGmContornos(contornos) {
+    const atual = contornos || gmLerContornos();
+    const ul = $("gm-contornos");
+    ul.innerHTML = "";
+    const nomes = currentMesh()?.boundary_names || [];
+    for (const nome of nomes) ul.appendChild(gmContornoRow(nome, atual[nome]));
+    gmSync();
+    colorBoundaryDots();
+  }
+
+  // ajusta campos que dependem de outros (tipo do corpo, opcoes de corpo nos
+  // contornos, descricoes e resumo)
+  function gmSync() {
+    // corpo renomeado: os contornos presos a ele acompanham o nome novo
+    for (const row of document.querySelectorAll("#gm-corpos .gm-corpo")) {
+      const antes = row.dataset.nome, agora = row.querySelector(".gm-nome").value.trim();
+      if (antes && agora && antes !== agora) {
+        for (const sel of document.querySelectorAll("#gm-contornos .gm-class")) {
+          const [mov, corpo] = sel.value.split(":");
+          if (corpo === antes) {
+            sel.appendChild(el("option", { value: `${mov}:${agora}` }));
+            sel.value = `${mov}:${agora}`;
+          }
+        }
+      }
+      row.dataset.nome = agora;
+    }
+    const corpos = gmLerCorpos();
+    const tipoDe = Object.fromEntries(corpos.filter((c) => c.nome).map((c) => [c.nome, c.tipo]));
+    for (const row of document.querySelectorAll("#gm-corpos .gm-corpo")) {
+      const tipo = row.querySelector(".gm-tipo").value;
+      row.dataset.tipo = tipo;
+      const u = tipo === "rotacao" ? " (°)" : "";
+      for (const [k, r] of [["malha", "malha"], ["inicio", "início"], ["fim", "fim"]]) {
+        row.querySelector(`[data-k="${k}"]`).previousElementSibling.textContent = r + u;
+      }
+    }
+    const resumo = [];
+    for (const row of document.querySelectorAll("#gm-contornos .gm-contorno")) {
+      const sel = row.querySelector(".gm-class");
+      const atual = sel.options.length ? sel.value : sel.dataset.inicial;
+      sel.innerHTML = "";
+      sel.appendChild(el("option", { value: "fixo", text: "fixo" }));
+      for (const [nome, tipo] of Object.entries(tipoDe)) {
+        for (const mov of ["rigido", "deslizante"]) {
+          const txt = `${mov === "rigido" ? "rígido" : "deslizante"} · ${GM_TIPO_NOME[tipo]} · ${nome}`;
+          sel.appendChild(el("option", { value: `${mov}:${nome}`, text: txt }));
+        }
+      }
+      sel.value = [...sel.options].some((o) => o.value === atual) ? atual : "fixo";
+      const [mov, corpo] = sel.value.split(":");
+      row.dataset.tipo = mov;
+      row.dataset.trans = tipoDe[corpo] === "translacao" ? "1" : "0";
+      const vel = row.querySelector(".gm-vel").value || GM_VEL_PADRAO[mov];
+      const desc = mov === "fixo" ? "parado"
+        : mov === "rigido" ? `anda com ${corpo}`
+        : tipoDe[corpo] === "rotacao" ? `desliza em arco (${corpo})` : `desliza em reta (${corpo})`;
+      row.querySelector(".gm-desc").textContent = desc;
+      if (mov !== "fixo") resumo.push(`<b>${row.dataset.name}</b>: ${desc}, fluido vê ${vel === "malha" ? "a velocidade dos nós" : vel === "corpo" ? "a velocidade do corpo" : "a condição da aba Contorno"}`);
+    }
+    const box = $("gm-resumo");
+    if (!$("gm-enabled").checked) {
+      box.className = "callout";
+      box.textContent = "Desligada: nenhum contorno se move.";
+    } else if (!resumo.length) {
+      box.className = "callout warn";
+      box.textContent = "Nenhum contorno móvel: escolha rígido ou deslizante em pelo menos um contorno.";
+    } else {
+      box.className = "callout good";
+      box.innerHTML = resumo.join("<br>") + "<br>Os contornos móveis com fluido em <b>malha</b> ou <b>corpo</b> precisam de vx e vy marcados na aba Contorno (o valor é trocado a cada passo).";
+    }
+    const ext = gmInteriorBase && gmInteriorBase.extensao;
+    const temOutros = gmInteriorBase && Object.keys(gmInteriorBase).some((k) => k !== "extensao");
+    $("gm-chi").disabled = !!(gmInteriorBase && Object.keys(gmInteriorBase).length && !ext);
+    $("gm-interior-note").textContent = temOutros
+      ? "O template tem outras opções do interior (rotação/suavização), mantidas como estão — edite no YAML."
+      : "Interior: extensão harmônica do deslocamento do contorno (a₃ = 1), sem rotação nem suavização.";
+  }
+
+  function gmBuild() {
+    const corpos = gmLerCorpos().filter((c) => c.nome);
+    const enabled = $("gm-enabled").checked;
+    if (!enabled && !corpos.length) return null;
+    const out = { enabled, corpos: {}, contornos: {} };
+    for (const c of corpos) {
+      const o = { tipo: c.tipo };
+      if (c.tipo === "rotacao") o.centro = [c.num("cx") || 0, c.num("cy") || 0];
+      else o.direcao = [c.num("dx") || 0, c.num("dy") || 0];
+      for (const k of ["malha", "inicio", "fim", "duracao", "atraso"]) {
+        const v = c.num(k);
+        if (Number.isFinite(v)) o[k] = v;
+      }
+      out.corpos[c.nome] = o;
+    }
+    for (const [nome, c] of Object.entries(gmLerContornos())) {
+      if (c.tipo === "fixo") continue;
+      if (c.tipo !== "deslizante" || out.corpos[c.corpo]?.tipo !== "rotacao") delete c.raio;
+      out.contornos[nome] = c;
+    }
+    const chi = parseFloat($("gm-chi").value);
+    const base = gmInteriorBase && Object.keys(gmInteriorBase).length ? gmInteriorBase : null;
+    if (!base) out.interior = { extensao: { a3: 1.0, chi: Number.isFinite(chi) ? chi : 2.0 } };
+    else if (base.extensao) out.interior = { ...base, extensao: { ...base.extensao, chi: Number.isFinite(chi) ? chi : 2.0 } };
+    else out.interior = base;
+    return out;
+  }
+
+  function gmApply(c) {
+    const gm = gmDoConfig(c) || {};
+    gmInteriorBase = gm.interior ?? null;
+    $("gm-enabled").checked = !!gm.enabled;
+    $("gm-chi").value = gmInteriorBase?.extensao?.chi ?? 2;
+    renderGmCorpos(gm.corpos);
+    renderGmContornos(gm.contornos || {});
+  }
+
+  function gmNovoCorpo() {
+    const usados = new Set(gmLerCorpos().map((c) => c.nome));
+    let i = 1;
+    while (usados.has(`corpo${i}`)) i++;
+    const dt = parseFloat($("f-dt").value), it = parseInt($("f-iterations").value, 10);
+    const dur = Number.isFinite(dt * it) ? dt * it : 1;
+    $("gm-corpos").appendChild(gmCorpoRow(`corpo${i}`, { tipo: "rotacao", inicio: 0, fim: 10, duracao: dur }));
+    gmSync();
+    formToDraft();
   }
 
   // -- config <-> formulario ---------------------------------------------
@@ -561,6 +807,8 @@ const NovaSimulacao = (() => {
     $("mm-amp").value = mm.amplitude_factor ?? 0.3;
     $("mm-omega").value = mm.omega ?? 31.41593;
     $("mm-seed").value = mm.seed ?? 0;
+
+    gmApply(c);
 
     syncSegs();
   }
@@ -610,6 +858,8 @@ const NovaSimulacao = (() => {
         seed: parseInt($("mm-seed").value, 10),
       };
     }
+    const gm = gmBuild();
+    if (gm) cfg.geometria_movel = gm;
     return cfg;
   }
 
@@ -1184,11 +1434,16 @@ const NovaSimulacao = (() => {
       if (ev.target.id === "f-mesh") return; // tratado em onMeshChange
       if (ev.target.id === "f-solver-metodo") fillPrecond(ev.target.value, $("f-solver-precond").value);
       if (ev.target.id === "f-solver-subsolver") syncChebPlaceholders();
+      // geometria movel e mesh_motion movem a malha de formas incompativeis: liga um, desliga o outro
+      if (ev.target.id === "gm-enabled" && ev.target.checked) $("mm-enabled").checked = false;
+      if (ev.target.id === "mm-enabled" && ev.target.checked) $("gm-enabled").checked = false;
+      if (ev.target.id === "gm-enabled" || ev.target.id === "mm-enabled" || ev.target.closest(".gm-corpo, .gm-contorno")) gmSync();
       formToDraft();
     };
     form.addEventListener("input", onEdit);
     form.addEventListener("change", onEdit);
     $("tpl-name").addEventListener("input", () => formToDraft());
+    $("gm-add-corpo").addEventListener("click", gmNovoCorpo);
 
     $("tpl-menu-btn").addEventListener("click", (e) => {
       e.stopPropagation();

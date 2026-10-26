@@ -314,6 +314,28 @@ main { height: calc(100vh - var(--head-h) - 10px); }
 .boundary-row .comp[data-mode="parab"] .comp-mode { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
 .boundary-row .comp .comp-value:disabled, .boundary-row .comp .comp-mode:disabled { opacity: .35; }
 
+/* geometria movel: um cartao por corpo e por contorno */
+.section h2.sub-h2 { margin-top: 28px; padding-top: 18px; border-top: 1px solid var(--border); }
+.gm-corpos { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.gm-corpo { border: 1px solid var(--border); border-radius: 14px; padding: 10px 12px; background: var(--glass); }
+.gm-corpo .gm-corpo-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.gm-corpo .gm-corpo-head input { flex: 1; min-width: 0; font-family: var(--mono); font-weight: 600; }
+.gm-corpo .gm-corpo-head select { flex: none; width: auto; }
+.gm-corpo .gm-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0 8px; }
+.gm-corpo .gm-grid .field { margin-bottom: 6px; }
+.gm-corpo .gm-grid .field > span { font-size: 11px; }
+.gm-corpo .gm-grid input { padding: 6px 8px; font-size: 12px; }
+.gm-contorno .gm-ctl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 8px; }
+.gm-contorno .gm-ctl .gm-class { grid-column: 1 / -1; }
+.gm-contorno .gm-ctl select, .gm-contorno .gm-ctl input { width: 100%; padding: 6px 8px; font-size: 12px; min-width: 0; }
+.gm-contorno[data-tipo="fixo"] .gm-ctl { grid-template-columns: 1fr; }
+.gm-contorno[data-tipo="fixo"] .gm-vel, .gm-contorno[data-tipo="fixo"] .gm-raio { display: none; }
+.gm-contorno:not([data-tipo="deslizante"]) .gm-raio, .gm-contorno[data-trans="1"] .gm-raio { visibility: hidden; }
+.gm-contorno[data-tipo="rigido"] { border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.gm-contorno[data-tipo="deslizante"] { border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
+.gm-desc { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.gm-corpo[data-tipo="rotacao"] .so-trans, .gm-corpo[data-tipo="translacao"] .so-rot { display: none; }
+
 /* ---------------------------------------------------------------- cartoes */
 
 .cards-col { padding-right: 4px; }

@@ -132,6 +132,26 @@
                 <label class="field"><span>seed</span><input id="mm-seed" type="number" step="1" value="0"></label>
               </div>
               <div class="callout" id="mm-ppp"></div>
+
+              <h2 class="sub-h2">Geometria móvel</h2>
+              <p class="lead">Contornos que se movem com um corpo (rotação ou translação). A malha é deslizante: a conectividade não muda, o interior segue a extensão harmônica e o sistema é remontado a cada passo.</p>
+              <label class="toggle"><input id="gm-enabled" type="checkbox"><span class="sw"></span><span>Habilitar <code>geometria_movel</code></span></label>
+
+              <h3>Corpos</h3>
+              <p class="hint">Cada corpo tem uma lei de movimento em rampa de cosseno, de <code>início</code> a <code>fim</code>. Rotação: ângulos em graus, em torno do centro. Translação: deslocamento ao longo da direção. <code>malha</code> é o estado em que a malha foi gerada (vazio = <code>início</code>).</p>
+              <div id="gm-corpos" class="gm-corpos"></div>
+              <button type="button" class="btn sm" id="gm-add-corpo">+ corpo</button>
+
+              <h3>Contornos</h3>
+              <p class="hint"><b>Fixo</b>: parado. <b>Rígido</b>: anda junto com o corpo. <b>Deslizante</b>: estica entre uma ponta parada e uma ponta presa ao corpo — em arco (corpo de rotação: nós sobre o círculo deslizam, dentro dele andam com o corpo, fora ficam parados) ou em reta (corpo de translação: base parada, ponta andando). A velocidade que o fluido vê: <b>malha</b> = dos nós, <b>corpo</b> = do ponto material do corpo, <b>condição</b> = o valor da aba Contorno.</p>
+              <ul id="gm-contornos" class="boundary-list"></ul>
+
+              <h3>Interior</h3>
+              <div class="grid2">
+                <label class="field"><span>χ da extensão harmônica (rigidez por área)</span><input id="gm-chi" type="number" step="any" min="0" value="2"></label>
+              </div>
+              <p class="hint" id="gm-interior-note"></p>
+              <div class="callout" id="gm-resumo"></div>
             </div>
 
             <!-- SOLVER -->
