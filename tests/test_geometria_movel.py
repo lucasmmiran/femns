@@ -274,3 +274,23 @@ def test_geometria_da_valvula():
     assert g.r == pytest.approx(R)
     assert np.degrees(g.theta_fechamento) == pytest.approx(2 * np.degrees(np.arctan(0.5)))
     assert g.fresta(0.0) == pytest.approx(1.0)
+
+
+def test_corpo_com_etapas():
+    cfg = gm.ler_config({"corpos": {"e": {"tipo": "rotacao", "inicio": 10, "malha": 17, "atraso": 1.0,
+                                          "etapas": [{"fim": 5, "duracao": 1.0}, {"fim": 40, "duracao": 7.0},
+                                                     {"fim": 5, "duracao": 7.0}]}},
+                         "contornos": {"a": {"tipo": "rigido", "corpo": "e"}}})
+    c = cfg.corpos["e"]
+    graus = lambda t: float(np.degrees(c.valor(t)))  # noqa: E731
+    assert c.fim == pytest.approx(np.radians(5)) and c.duracao == 15.0 and c.malha == pytest.approx(np.radians(17))
+    for t, esperado in ((0.0, 10), (1.0, 10), (2.0, 5), (9.0, 40), (16.0, 5), (99.0, 5)):
+        assert graus(t) == pytest.approx(esperado, abs=1e-12)
+    assert graus(1.5) == pytest.approx(7.5)                     # meio da 1a rampa
+    assert graus(5.5) == pytest.approx(22.5)                    # meio da 2a
+    eps = 1e-6                                                  # velocidade nula nas trocas de sentido
+    for tt in (2.0, 9.0):
+        assert abs(c.valor(tt + eps) - c.valor(tt - eps)) / (2 * eps) < 1e-4
+    with pytest.raises(ValueError, match="OU"):
+        gm.ler_config({"corpos": {"e": {"tipo": "rotacao", "inicio": 10, "fim": 5, "etapas": [{"fim": 5, "duracao": 1}]}},
+                       "contornos": {"a": {"tipo": "rigido", "corpo": "e"}}})

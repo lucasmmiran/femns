@@ -14,7 +14,9 @@ contorno: um contorno "rigido de rotacao" e' um `Rigido` preso a um corpo
 
 Os dois seguem a rampa em cosseno `inicio -> fim` em `duracao` s apos
 `atraso` s (`valvula_rotacao.theta_em`). `malha` e' o estado em que a malha
-foi gerada (padrao: `inicio`).
+foi gerada (padrao: `inicio`). Com `etapas: [{fim, duracao}, ...]` no lugar
+de `fim`/`duracao`, o corpo percorre varias rampas em sequencia (ex.: fecha,
+abre, fecha de novo), cada uma saindo e chegando com velocidade nula.
 
 **Contornos** (`contornos:`, por grupo fisico) -- *como* os nos do contorno
 andam. Aqui a distincao e' por subclasse, porque o comportamento muda:
@@ -73,13 +75,21 @@ class Corpo:
     duracao: float
     atraso: float = 0.0
     malha: float | None = None
+    etapas: tuple | None = None   # ((fim, duracao), ...): rampas em sequencia a partir de `inicio`
 
     def __post_init__(self):
         if self.malha is None:
             self.malha = self.inicio
 
     def valor(self, t: float) -> float:
-        return theta_em(t, self.inicio, self.fim, self.duracao, self.atraso)
+        if self.etapas is None:
+            return theta_em(t, self.inicio, self.fim, self.duracao, self.atraso)
+        t0, ini = self.atraso, self.inicio
+        for fim, dur in self.etapas:
+            if t <= t0 + dur:
+                return theta_em(t, ini, fim, dur, t0)
+            t0, ini = t0 + dur, fim
+        return ini
 
 
 @dataclass
@@ -201,7 +211,7 @@ def ler_config(cfg: dict, duracao_padrao: float | None = None) -> ConfigGeometri
         if not isinstance(c, dict):
             raise ValueError(f"geometria_movel.corpos.{nome} precisa ser um mapa")
         tipo = c.get("tipo")
-        comuns = {"tipo", "inicio", "fim", "duracao", "atraso", "malha"}
+        comuns = {"tipo", "inicio", "fim", "duracao", "atraso", "malha", "etapas"}
         if tipo == "rotacao":
             permitidas = comuns | {"centro"}
         elif tipo == "translacao":
@@ -210,20 +220,42 @@ def ler_config(cfg: dict, duracao_padrao: float | None = None) -> ConfigGeometri
             raise ValueError(f"geometria_movel.corpos.{nome}.tipo: use rotacao ou translacao (recebido {tipo!r})")
         if set(c) - permitidas:
             raise ValueError(f"geometria_movel.corpos.{nome}: chave(s) desconhecida(s) {sorted(set(c) - permitidas)}")
-        for k in ("inicio", "fim"):
-            if k not in c:
-                raise ValueError(f"geometria_movel.corpos.{nome}.{k} e' obrigatorio")
-        duracao = c.get("duracao", duracao_padrao)
-        if duracao is None or _num(duracao, f"corpos.{nome}.duracao") <= 0:
-            raise ValueError(f"geometria_movel.corpos.{nome}.duracao precisa ser > 0")
+        if "inicio" not in c:
+            raise ValueError(f"geometria_movel.corpos.{nome}.inicio e' obrigatorio")
+        etapas = None
+        if c.get("etapas") is not None:
+            if "fim" in c or "duracao" in c:
+                raise ValueError(f"geometria_movel.corpos.{nome}: use etapas OU fim/duracao, nao os dois")
+            if not isinstance(c["etapas"], list) or not c["etapas"]:
+                raise ValueError(f"geometria_movel.corpos.{nome}.etapas: lista de {{fim, duracao}}")
+            etapas = []
+            for i, e in enumerate(c["etapas"]):
+                if not isinstance(e, dict) or set(e) != {"fim", "duracao"}:
+                    raise ValueError(f"geometria_movel.corpos.{nome}.etapas[{i}]: use {{fim: ..., duracao: ...}}")
+                if _num(e["duracao"], f"corpos.{nome}.etapas[{i}].duracao") <= 0:
+                    raise ValueError(f"geometria_movel.corpos.{nome}.etapas[{i}].duracao precisa ser > 0")
+                etapas.append([_num(e["fim"], f"corpos.{nome}.etapas[{i}].fim"), float(e["duracao"])])
+            fim, duracao = etapas[-1][0], sum(d for _, d in etapas)
+        else:
+            if "fim" not in c:
+                raise ValueError(f"geometria_movel.corpos.{nome}.fim e' obrigatorio (ou etapas)")
+            fim = _num(c["fim"], f"corpos.{nome}.fim")
+            duracao = c.get("duracao", duracao_padrao)
+            if duracao is None or _num(duracao, f"corpos.{nome}.duracao") <= 0:
+                raise ValueError(f"geometria_movel.corpos.{nome}.duracao precisa ser > 0")
         args = dict(nome=nome, inicio=_num(c["inicio"], f"corpos.{nome}.inicio"),
-                    fim=_num(c["fim"], f"corpos.{nome}.fim"), duracao=float(duracao),
+                    fim=fim, duracao=float(duracao),
                     atraso=_num(c.get("atraso", 0.0), f"corpos.{nome}.atraso"),
                     malha=None if c.get("malha") is None else _num(c["malha"], f"corpos.{nome}.malha"))
         if tipo == "rotacao":
             for k in ("inicio", "fim", "malha"):
                 if args[k] is not None:
                     args[k] = float(np.radians(args[k]))
+            if etapas is not None:
+                etapas = [[float(np.radians(v)), d] for v, d in etapas]
+        if etapas is not None:
+            args["etapas"] = tuple(tuple(e) for e in etapas)
+        if tipo == "rotacao":
             corpos[nome] = Rotacao(**args, centro=_par(c.get("centro", [0.0, 0.0]), f"corpos.{nome}.centro"))
         else:
             d = _par(c.get("direcao", [0.0, 1.0]), f"corpos.{nome}.direcao")
