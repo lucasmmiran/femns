@@ -51,7 +51,7 @@ from dataclasses import dataclass
 
 import torch
 
-from femns.krylov import _csr_diagonal, chebyshev_fsai, chebyshev_jacobi, jacobi_preconditioner, limites_jacobi
+from femns.krylov import _csr_diagonal, _mv, chebyshev_fsai, chebyshev_jacobi, jacobi_preconditioner, limites_jacobi
 
 NOMES = ("nenhum", "jacobi", "bloco_triangular", "bloco_diagonal")
 SUBSOLVERS = ("chebyshev", "fsai", "lu")
@@ -70,10 +70,6 @@ class PassosChebyshev:
     velocidade: int = 40
     massa: int = 5
     laplaciano: int = 80
-
-
-def _mv(A, v):
-    return torch.mm(A, v.unsqueeze(1)).squeeze(1)
 
 
 def _lu(A_csr):
@@ -98,22 +94,32 @@ class _Blocos:
         self.np = sistema.Mp.shape[0]
         self.eh_cc = sistema.eh_cc
         self.eh_cc_p = sistema.eh_cc[2 * self.nn:]
+        # Fx e Fy so diferem nas linhas/colunas eliminadas pelas CCs. Com os
+        # mesmos nos prescritos em vx e vy (paredes com no-slip, entrada com
+        # vx e vy) as duas matrizes sao identicas: um sub-solver so, aplicado
+        # as duas componentes de uma vez como bloco (n, 2) -- um SpMM custa o
+        # mesmo que um SpMV, e a FSAI e os limites sao montados uma vez.
+        self.F_unico = torch.equal(sistema.eh_cc[:self.nn], sistema.eh_cc[self.nn:2 * self.nn])
 
         if subsolver == "lu":
-            self.Fx_inv, self.Fy_inv = _lu(sistema.Fx), _lu(sistema.Fy)
+            self.Fx_inv = _lu(sistema.Fx)
+            self.Fy_inv = self.Fx_inv if self.F_unico else _lu(sistema.Fy)
             self.Mp_inv, self.Lp_inv = _lu(sistema.Mp), _lu(sistema.Lp)
         elif subsolver == "fsai":
             self.Fx_inv = chebyshev_fsai(sistema.Fx, passos.velocidade)
-            self.Fy_inv = chebyshev_fsai(sistema.Fy, passos.velocidade)
+            self.Fy_inv = self.Fx_inv if self.F_unico else chebyshev_fsai(sistema.Fy, passos.velocidade)
             dmp = _csr_diagonal(sistema.Mp)
             self.Mp_inv = chebyshev_jacobi(sistema.Mp, dmp, *_LIMITES_MASSA_P1, passos.massa)
             self.Lp_inv = chebyshev_fsai(sistema.Lp, passos.laplaciano)
         elif subsolver == "chebyshev":
             dx = _csr_diagonal(sistema.Fx)
-            dy = _csr_diagonal(sistema.Fy)
             lmin_f, lmax_f = limites_jacobi(sistema.Fx, dx)  # Fx e Fy so diferem nas CCs: mesmos limites
             self.Fx_inv = chebyshev_jacobi(sistema.Fx, dx, lmin_f, lmax_f, passos.velocidade)
-            self.Fy_inv = chebyshev_jacobi(sistema.Fy, dy, lmin_f, lmax_f, passos.velocidade)
+            if self.F_unico:
+                self.Fy_inv = self.Fx_inv
+            else:
+                dy = _csr_diagonal(sistema.Fy)
+                self.Fy_inv = chebyshev_jacobi(sistema.Fy, dy, lmin_f, lmax_f, passos.velocidade)
 
             dmp = _csr_diagonal(sistema.Mp)
             self.Mp_inv = chebyshev_jacobi(sistema.Mp, dmp, *_LIMITES_MASSA_P1, passos.massa)
@@ -139,6 +145,9 @@ class _Blocos:
         return torch.where(self.eh_cc_p, rp, zp)
 
     def F_inv(self, ru):
+        if self.F_unico:
+            z = self.Fx_inv(ru.view(2, self.nn).T)  # colunas = (vx, vy)
+            return z.T.reshape(-1)
         return torch.cat([self.Fx_inv(ru[:self.nn]), self.Fy_inv(ru[self.nn:])])
 
 

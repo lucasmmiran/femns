@@ -216,7 +216,15 @@ def minres(A: torch.Tensor, b: torch.Tensor, x0: torch.Tensor = None,
 
 
 def _mv(A, v):
+    """`A @ v` com `A` esparsa; `v` vetor `(n,)` ou bloco de colunas `(n, k)` (um SpMM so)."""
+    if v.dim() == 2:
+        return torch.mm(A, v)
     return torch.mm(A, v.unsqueeze(1)).squeeze(1)
+
+
+def _por_linha(d: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
+    """`d * r` com `d` `(n,)` escalando as linhas de `r` (vetor ou bloco `(n, k)`)."""
+    return d.unsqueeze(1) * r if r.dim() == 2 else d * r
 
 
 def _lanczos_extremos(op, n: int, dtype, device, passos: int = 30, seed: int = 0):
@@ -273,7 +281,8 @@ def chebyshev(A: torch.Tensor, M_inv, lambda_min: float, lambda_max: float, pass
     `r -> z ~ A^-1 r`: um polinomio fixo em `M_inv A` vezes `M_inv`, portanto
     **linear, fixo e simetrico** -- serve dentro de pre-condicionadores do
     BiCGSTAB e do MINRES. Custa `passos - 1` multiplicacoes por `A` e `passos`
-    aplicacoes de `M_inv`.
+    aplicacoes de `M_inv`. `r` pode ser um bloco `(n, k)`: as `k` colunas
+    andam juntas, com SpMM no lugar de SpMV (e `M_inv` tem de aceitar blocos).
 
     Refs.: G. H. Golub, R. S. Varga (1961), Numer. Math. 3:147-168;
     Y. Saad (2003), Iterative Methods for Sparse Linear Systems, 2a ed., SIAM,
@@ -304,7 +313,7 @@ def chebyshev(A: torch.Tensor, M_inv, lambda_min: float, lambda_max: float, pass
 def chebyshev_jacobi(A: torch.Tensor, diag: torch.Tensor, lambda_min: float, lambda_max: float, passos: int):
     """`chebyshev` com Jacobi (`M_inv = D^-1`). Ref. adicional: A. J. Wathen, T. Rees (2009), ETNA 34:125-135."""
     d_inv = 1.0 / diag
-    return chebyshev(A, lambda r: d_inv * r, lambda_min, lambda_max, passos)
+    return chebyshev(A, lambda r: _por_linha(d_inv, r), lambda_min, lambda_max, passos)
 
 
 def fsai(A: torch.Tensor):

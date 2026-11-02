@@ -121,3 +121,67 @@ def test_metodos_e_precondicionadores_batem_com_a_solucao_direta(metodo, precond
     assert info["residual_verdadeiro"] <= 1e-10
     assert info["erro_direto_v"] < 1e-7
     assert info["erro_direto_p"] < 1e-7
+
+
+def _sistema_poiseuille(cond):
+    """`Sistema` com blocos (Poiseuille, MINI) para as condicoes `cond`."""
+    import numpy as np
+
+    from femns.boundary import assign_boundary_names, build_boundary_conditions
+    from femns.elemento import MINI
+    from femns.mesh import read_mesh
+    from femns.reassembly import Remontador
+
+    malha = read_mesh("meshes/poiseuille.msh")
+    IEN, X, Y, IENb = MINI.adiciona_nos(malha.IEN, malha.X, malha.Y, malha.IENbound)
+    npo, nn = malha.npoints, len(X)
+    nomes = assign_boundary_names(IENb, malha.IENboundElem, npo, ["outlet", "inlet", "top", "bottom"], nnodes=nn)
+    vxc, vyc, pc, vxp, vyp, pp = build_boundary_conditions(IENb, nomes, cond, npo, "cpu", nnodes=nn, X=X, Y=Y,
+                                                          IENboundElem=malha.IENboundElem)
+    R = Remontador(0.01, 1.0, torch.from_numpy(X), torch.from_numpy(Y), torch.from_numpy(IEN), MINI, npo, nn - npo,
+                   vxp, vyp, pp, valores_cc=(vxc, vyc, pc), precisa_blocos=True)
+    v_star = torch.from_numpy(np.where(np.arange(nn) < npo, 0.5, 0.4))
+    return R.sistema_inicial, v_star, npo, nn
+
+
+_COND_NO_SLIP = {"inlet": {"vx": 1.0, "vy": 0.0}, "bottom": {"vx": 0.0, "vy": 0.0},
+                 "top": {"vx": 0.0, "vy": 0.0}, "outlet": {"p": 0.0}}
+
+
+@pytest.mark.parametrize("subsolver", ["chebyshev", "fsai", "lu"])
+def test_F_inv_em_bloco_igual_ao_por_componente(subsolver):
+    """Com os mesmos nos prescritos em vx e vy, `Fx == Fy` e `_Blocos` aplica um
+    sub-solver so as duas componentes como bloco (n, 2). Tem de dar o mesmo que
+    aplicar o sub-solver de cada componente separado (o caminho antigo)."""
+    from femns.precondicionadores import PassosChebyshev, _Blocos
+
+    sis, _, _, nn = _sistema_poiseuille(_COND_NO_SLIP)
+    assert torch.equal(sis.Fx.values(), sis.Fy.values())
+
+    blocos = _Blocos(sis, 0.01, 1.0, PassosChebyshev(5, 5, 10), subsolver)
+    assert blocos.F_unico
+
+    ru = torch.randn(2 * nn, dtype=torch.float64, generator=torch.Generator().manual_seed(0))
+    em_bloco = blocos.F_inv(ru)
+    blocos.F_unico = False  # forca o caminho por componente, com o mesmo sub-solver
+    separado = blocos.F_inv(ru)
+
+    assert torch.allclose(em_bloco, separado, rtol=1e-12, atol=1e-14 * separado.abs().max().item())
+
+
+def test_F_inv_por_componente_quando_as_ccs_de_vx_e_vy_diferem():
+    """Parede de deslizamento (so `vy = 0`) no topo: `Fx != Fy`, entao `_Blocos`
+    mantem um sub-solver por componente, e o MINRES continua batendo com o direto."""
+    from femns.precondicionadores import PassosChebyshev, _Blocos, montar
+
+    cond = dict(_COND_NO_SLIP, top={"vy": 0.0})
+    sis, v_star, npo, nn = _sistema_poiseuille(cond)
+    assert not _Blocos(sis, 0.01, 1.0, PassosChebyshev(5, 5, 10), "fsai").F_unico
+
+    precond = montar("bloco_diagonal", sis, 0.01, 1.0, subsolver="fsai")
+    _, _, _, _, info = time_step(sis, v_star, 0 * v_star, 0.01, npo, nn - npo, metodo="minres",
+                                 precond=precond, tol=1e-10, max_iter=5000, verificar_direto=True)
+
+    assert info["residual_verdadeiro"] <= 1e-10
+    assert info["erro_direto_v"] < 1e-7
+    assert info["erro_direto_p"] < 1e-7
