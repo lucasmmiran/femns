@@ -622,6 +622,19 @@ chave.do.config=valor` testa uma variante sem editar o yaml (ex.:
 `--set simulation.solver.chebyshev.velocidade=3`); `referencia --de
 <pasta>` troca a referência gravada.
 
+### Teste ponta a ponta do laço (pytest)
+
+`tests/test_laco_ponta_a_ponta.py` chama `run_simulation.main()` de verdade,
+em CPU, por 3 passos, em dois casos: o Poiseuille acima (MINI +
+`mesh_motion`) e a válvula de `configs/valvula_10g.yaml` (Tri6 +
+`geometria_movel`, com a rotação acelerada para a esfera girar ~0,24° em 3
+passos). Compara rms, máximo e média de `vx`, `vy`, `p` e o deslocamento da
+malha com `tests/referencias/laco_ponta_a_ponta.json` (limite `1e-6`
+relativo à escala do campo). Roda na suíte normal (~7 s). Uma refatoração
+de `main()` tem que passar sem tocar na referência; se a mudança alterar a
+numérica de propósito, regrave com
+`FEMNS_REGRAVAR_REFERENCIA=1 pytest tests/test_laco_ponta_a_ponta.py`.
+
 ## Limitações conhecidas / próximos passos
 
 - Sem suporte a outras geometrias além de malhas triangulares (MINI ou
