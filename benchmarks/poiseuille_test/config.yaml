@@ -1,0 +1,32 @@
+mesh: meshes/Poiseuille_test.msh
+output_dir: solucoes/poiseuille_test/referencia_e29711e
+historico_csv: solucoes/poiseuille_test/referencia_e29711e/historico.csv
+simulation:
+  dt: 0.01
+  iterations: 4000
+  reynolds: 100
+  element: mini
+  vtk_interval: 500
+boundary:
+  priority:
+  - outlet
+  - inlet
+  - upper
+  - down
+  conditions:
+    inlet:
+      vx:
+        perfil: parabolico
+        vmax: 1.5
+      vy: 0.0
+    down:
+      vx: 0.0
+      vy: 0.0
+    upper:
+      vx: 0.0
+      vy: 0.0
+mesh_motion:
+  enabled: true
+  amplitude_factor: 0.3
+  omega: 31.41592653589793
+  seed: 0

@@ -565,7 +565,37 @@ próximo de zero; um valor crescendo ao longo dos passos é sinal de
 instabilidade numérica antes mesmo da velocidade "explodir" visivelmente.
 Sem `benchmark_xlsx` no config, nada disso é calculado — o custo extra
 (pequeno: 2 produtos matriz-vetor esparsos por passo) só é pago quando
-pedido.
+pedido. Com `historico_csv: <arquivo>` as mesmas métricas saem passo a
+passo (1 linha por iteração), em vez de agregadas.
+
+### Teste de regressão do solver (Poiseuille com malha móvel)
+
+Para validar mudanças no solver que **não** dão resultado bit a bit igual
+(passos de Chebyshev, critério de parada, outro pré-condicionador), há um
+caso fixo com referência gravada:
+
+- malha `meshes/Poiseuille_test.msh` (canal 7 × 1, 5600 triângulos,
+  contornos `inlet`/`outlet`/`upper`/`down`; gerada por
+  `scripts/gerar_malha_poiseuille_test.py`);
+- config `configs/poiseuille_test.yaml`: perfil parabólico na entrada
+  (`vmax = 1.5`), no-slip nas paredes, saída livre, Re = 100, `dt = 0.01`,
+  4000 passos, **todos os nós interiores oscilando** (ALE);
+- referência em `benchmarks/poiseuille_test/` (frames a cada 500 passos,
+  histórico por passo e o commit que a gerou).
+
+```bash
+python scripts/teste_poiseuille.py rodar --saida solucoes/pt_novo
+python scripts/teste_poiseuille.py comparar --saida solucoes/pt_novo
+```
+
+O `comparar` mede a diferença de cada campo contra a referência (limite
+`1e-5` relativo à escala do campo), o erro contra a solução exata
+(`vx = 6y(1-y)`, `vy = 0`, `dp/dx = -12/Re`, que não pode piorar mais de
+1%) e os passos não convergidos, e sai com código 1 se algum falhar. Também
+compara iterações do MINRES e tempo por passo. `rodar --set
+chave.do.config=valor` testa uma variante sem editar o yaml (ex.:
+`--set simulation.solver.chebyshev.velocidade=3`); `referencia --de
+<pasta>` troca a referência gravada.
 
 ## Limitações conhecidas / próximos passos
 
