@@ -1,0 +1,42 @@
+# Teste de regressao do solver (Poiseuille com malha movel).
+#
+# Serve para validar mudancas que NAO dao resultado bit a bit identico (passos
+# de Chebyshev, criterio de parada, outro pre-condicionador...): roda-se este
+# caso com o codigo novo e compara-se contra a referencia gravada em
+# `benchmarks/poiseuille_test/` -- ver scripts/teste_poiseuille.py.
+#
+# Canal 7 x 1 (meshes/Poiseuille_test.msh, gerada por
+# scripts/gerar_malha_poiseuille_test.py), perfil parabolico na entrada
+# (vmax = 1,5, vazao 1), paredes com no-slip e saida livre (sem CC: condicao
+# natural). A solucao exata e' vx = 6 y (1 - y), vy = 0 em todo o canal, entao
+# alem de comparar com a referencia da para medir o erro absoluto.
+#
+# Malha sempre movel: todos os nos interiores oscilam (ALE), para o teste
+# exercitar a remontagem e o pre-condicionador refeito a cada passo, como na
+# valvula. `output_dir`, `benchmark_xlsx` e `historico_csv` sao trocados pelo
+# script de teste para a pasta de cada run.
+mesh: meshes/Poiseuille_test.msh
+output_dir: solucoes/poiseuille_test
+historico_csv: solucoes/poiseuille_test/historico.csv
+
+simulation:
+  dt: 0.01
+  iterations: 4000
+  reynolds: 100     # o mesmo da valvula, o caso que as otimizacoes miram
+  element: mini
+  vtk_interval: 500 # 8 frames + o final; e' o que o teste compara
+
+boundary:
+  priority: [outlet, inlet, upper, down]
+  conditions:
+    inlet: {vx: {perfil: parabolico, vmax: 1.5}, vy: 0.0}
+    down:  {vx: 0.0, vy: 0.0}
+    upper: {vx: 0.0, vy: 0.0}
+    # outlet: sem condicao (saida livre)
+
+# omega = 2 pi / (20 dt): 20 passos por periodo da oscilacao
+mesh_motion:
+  enabled: true
+  amplitude_factor: 0.3
+  omega: 31.41592653589793
+  seed: 0

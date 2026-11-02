@@ -212,8 +212,11 @@ def main():
     # entre si -- so ativa se o config tiver benchmark_xlsx, pra nao mudar
     # nada no caminho padrao. A divergencia por passo vem de
     # `remontador.divergencia` (D = -G^T, sem beta).
+    # `historico_csv` grava as mesmas metricas passo a passo (1 linha por
+    # iteracao), para comparar dois runs no tempo (scripts/teste_poiseuille.py).
     benchmark_xlsx = cfg.get("benchmark_xlsx")
-    if benchmark_xlsx:
+    historico_csv = cfg.get("historico_csv")
+    if benchmark_xlsx or historico_csv:
         bicg_iters_hist, bicg_residual_hist = [], []
         tempo_passo_hist, erro_direto_v_hist, erro_direto_p_hist = [], [], []
         vel_l2_hist, vel_linf_hist, div_l2_hist = [], [], []
@@ -396,7 +399,7 @@ def main():
         vx_sol = vx[:npoints]
         vy_sol = vy[:npoints]
 
-        if benchmark_xlsx:
+        if benchmark_xlsx or historico_csv:
             bicg_iters_hist.append(info["iters"])
             bicg_residual_hist.append(info["residual_verdadeiro"])
             tempo_passo_hist.append(tempo_passo)
@@ -443,6 +446,16 @@ def main():
             )
 
     print(f"Tempo final: {round(timer() - start, 2)} segundos")
+
+    if historico_csv:
+        os.makedirs(os.path.dirname(historico_csv) or ".", exist_ok=True)
+        with open(historico_csv, "w") as f:
+            f.write("iteracao,iters,residual,tempo_passo_s,vel_l2,vel_linf,divergencia_l2\n")
+            for k, linha in enumerate(zip(bicg_iters_hist, bicg_residual_hist, tempo_passo_hist,
+                                          vel_l2_hist, vel_linf_hist, div_l2_hist), start=1):
+                f.write(f"{k},{linha[0]},{linha[1]:.6e},{linha[2]:.6f},{linha[3]:.12e},{linha[4]:.12e},"
+                        f"{linha[5]:.12e}\n")
+        print(f"Historico por passo salvo em {historico_csv}")
 
     if benchmark_xlsx:
         tempo_total = timer() - start
